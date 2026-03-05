@@ -1,0 +1,42 @@
+Convert the list of multiple paths through components on a microfluidic chip, provided as input, into a microfluidic assay suitable for prompting a specially fine-tuned LLM capable of creating microfluidic chip designs. The prompt should be constructed step by step and should align in style with the examples provided in the example section, following the steps outlined below.
+
+# Steps
+
+1. Randomly select 10 different existing microfluidic assays with a scientific name from your knowledge. Examples include the ChIP (Chromatin Immunoprecipitation) assay and a ctDNA/SPM separation assay. Ensure the names of the selected assays are explicitly written in the output.
+2. From these, pick the {random number} assay, and ensure the names of the solutions, cells, and other materials used in that assay (such as DPBS, MNase, ctDNA, SPM particles, etc., which are only examples from the given assays) are also explicitly written in the output together with the name of the chosen assay.
+3. Craft a varied introduction for the prompt that mimics how real users might request a conversational AI to design a microfluidic chip, incorporating the name of the microfluidic assay you selected.
+4. Go through the sentences in the input starting with "from", "smaller/larger particles from", or "guide droplets made from", where each sentence represents one path. Every path should correspond to one indivdual step of the assay. Convert each of these paths into a separate part of the output prompt:
+  - Replace all unspecific terms like 'droplets,' 'fluid,' and 'particles' with the names you kept in mind for your selected microfluidic assay, ensuring they fit the context of the current path based on the overall details of the assay.
+  - Retain the names of the microfluidic components.
+  - Example based on the examples provided in the example section:
+    a. Input: "From inlet 1 to mixer 1." Output: "Load cells through inlet 1 into mixer 1."
+    b. Input: "From inlet 8 through mixer 1 to mixer 2." Output: "Flow DPBS from inlet 8 to flush the fluids in mixer 1 to mixer 2."
+5. Extract any relevant details of the microfluidic components, such as their functions, specifications, or any other attributes mentioned in the remaining sentences and integrate them into the input. How you incorporate these details is up to you—feel free to experiment with different approaches, just as a real user would, to ensure all relevant information is captured.
+
+# Example Section
+
+1. Design a microfluidic chip for a ChIP assay. Load cells through inlet 1 into mixer 1. Rinse the cells in mixer 1 by flowing DPBS from inlet 1 into mixer 1. All excess fluids exit mixer 1 via outlet 1. Load buffer fluids from inlet 2 through the mixer to outlet 2. Mix the buffer fluids with the cells in mixer 1. Load MNase into mixer 1 from inlet 3. Mix the cells with MNase in mixer 1. Load buffer fluids to mixer 1 from inlet 4. Rinse mixers 2, 3, and 4 by flowing beads through inlets 5, 6 and 7 to outlets 3, 4, and 5. Flow DPBS from inlet 8 to flush the fluids in mixer 1 to mixers 2, 3 and 4.
+2. Create a microfluidic design for the separation of ctDNA from SPM particles. First, ctDNA could be separated from platelets before entering the next part of the microchannel. Second, an inlet was designed at the other end of the microchannel, especially for the input of SPM particles. The ctDNA and SPM particles moved to the second part of the curved microchannel, which was designed for the effective mixing of particles. When the ctDNA was fully hybrid with the SPM beads, it could be effectively attached or absorbed to the SPM beads. When the solution was moved to the third part of the microfluidic channel, the SPM particles were separated from ctDNA. The ctDNA could be collected in the outlet channel.
+
+# Output Format
+
+Scientific names of the 10 different assays:
+
+Names of the solutions, cells, and other materials needed for one of these assays:
+
+Output prompt:
+```json
+{
+  "prompt": "[Your natural-sounding prompt here]"
+}
+```
+
+# Notes 
+
+- Each microfluidic assay should be created individually and with creativity, utilizing the full range of knowledge about microfluidics.
+- Try using multiple distinct solutions and/or cell types for a single assay.
+- The prompt should be written in a way that is only understandable to microfluidic experts. Write with the language and terminology of a microfluidics expert.
+- Only the components mentioned in the input are available for use.
+- When the phrase 'Guide droplets made from [component] through/to'  is used, it means that droplets are formed from the fluid coming from the specified component and then guided through/to the subsequent components on the path.
+- Ensure that all unspecified names are replaced with the names of the solutions, cells, and other materials specified in the output.
+- Ensure that all component details are included in the prompt.

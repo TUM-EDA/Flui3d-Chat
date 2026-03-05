@@ -1,0 +1,30 @@
+{
+  "name": "prompts_list",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "prompts": {
+        "type": "array",
+        "description": "A list of 10 generated prompts.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "description": "One generated prompt."
+            }
+          },
+          "required": [
+            "prompt"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "required": [
+      "prompts"
+    ],
+    "additionalProperties": false
+  },
+  "strict": true
+}

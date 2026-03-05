@@ -1,0 +1,252 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Microfluidic Chip",
+    "description": "A microfluidic chip design as JSON",
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+        "connections": {
+            "description": "Array of connections between components",
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "pattern": "^((inlet|mixer|delay|chamber|droplet)_[0-9]+|filter_[0-9]+_(smaller|larger))$",
+                        "description": "ID of the source component"
+                    },
+                    "target": {
+                        "type": "string",
+                        "pattern": "^((outlet|mixer|delay|chamber|filter)_[0-9]+|droplet_[0-9]+_(continuous|dispersed))$",
+                        "description": "ID of the target component"
+                    }
+                },
+                "required": [
+                    "source",
+                    "target"
+                ]
+            }
+        },
+        "junctions": {
+            "description": "Array of junctions for splitting or combining fluid flows",
+            "type": "array",
+            "items": {
+                "type": "object",
+                "oneOf": [
+                    {
+                        "description": "Junction with one source splitting into two targets",
+                        "additionalProperties": false,
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "pattern": "^junction_[0-9]+$",
+                                "description": "Unique identifier for the junction"
+                            },
+                            "type": {
+                                "type": "string",
+                                "enum": [
+                                    "T-junction",
+                                    "Y-junction"
+                                ],
+                                "description": "Type of junction"
+                            },
+                            "source": {
+                                "type": "string",
+                                "pattern": "^((inlet|mixer|delay|chamber|droplet|junction)_[0-9]+|filter_[0-9]+_(smaller|larger))$",
+                                "description": "ID of the source component"
+                            },
+                            "target_1": {
+                                "type": "string",
+                                "pattern": "^((outlet|mixer|delay|chamber|filter|junction)_[0-9]+|droplet_[0-9]+_(continuous|dispersed))$",
+                                "description": "ID of the first target component"
+                            },
+                            "target_2": {
+                                "type": "string",
+                                "pattern": "^((outlet|mixer|delay|chamber|filter|junction)_[0-9]+|droplet_[0-9]+_(continuous|dispersed))$",
+                                "description": "ID of the second target component"
+                            }
+                        },
+                        "required": [
+                            "id",
+                            "type",
+                            "source",
+                            "target_1",
+                            "target_2"
+                        ]
+                    },
+                    {
+                        "description": "Junction with two sources combining into one target",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "pattern": "^junction_[0-9]+$",
+                                "description": "Unique identifier for the junction"
+                            },
+                            "type": {
+                                "type": "string",
+                                "enum": [
+                                    "T-junction",
+                                    "Y-junction"
+                                ],
+                                "description": "Type of junction"
+                            },
+                            "source_1": {
+                                "type": "string",
+                                "pattern": "^((inlet|mixer|delay|chamber|droplet|junction)_[0-9]+|filter_[0-9]+_(smaller|larger))$",
+                                "description": "ID of the first source component"
+                            },
+                            "source_2": {
+                                "type": "string",
+                                "pattern": "^((inlet|mixer|delay|chamber|droplet|junction)_[0-9]+|filter_[0-9]+_(smaller|larger))$",
+                                "description": "ID of the second source component"
+                            },
+                            "target": {
+                                "type": "string",
+                                "pattern": "^((outlet|mixer|delay|chamber|filter|junction)_[0-9]+|droplet_[0-9]+_(continuous|dispersed))$",
+                                "description": "ID of the target component"
+                            }
+                        },
+                        "required": [
+                            "id",
+                            "type",
+                            "source_1",
+                            "source_2",
+                            "target"
+                        ]
+                    }
+                ]
+            }
+        },
+        "component_params": {
+            "type": "object",
+            "description": "Parameters for components with parameters (mixers, delays, chambers, filters)",
+            "additionalProperties": false,
+            "properties": {
+                "mixers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "pattern": "^mixer_[0-9]+$"
+                            },
+                            "num_turnings": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 4,
+                                "description": "Number of turns in the serpentine channel"
+                            }
+                        },
+                        "required": [
+                            "id",
+                            "num_turnings"
+                        ]
+                    }
+                },
+                "delays": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "pattern": "^delay_[0-9]+$"
+                            },
+                            "num_turnings": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 4,
+                                "description": "Number of turns in the serpentine channel"
+                            }
+                        },
+                        "required": [
+                            "id",
+                            "num_turnings"
+                        ]
+                    }
+                },
+                "chambers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "pattern": "^chamber_[0-9]+$"
+                            },
+                            "dimensions": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                    "length": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "default": 4000,
+                                        "unit": "µm",
+                                        "description": "Length in micrometers"
+                                    },
+                                    "width": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "default": 3200,
+                                        "unit": "µm",
+                                        "description": "Width in micrometers"
+                                    }
+                                },
+                                "required": [
+                                    "length",
+                                    "width"
+                                ]
+                            }
+                        },
+                        "required": [
+                            "id",
+                            "dimensions"
+                        ]
+                    }
+                },
+                "filters": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "pattern": "^filter_[0-9]+$"
+                            },
+                            "critical_particle_diameter": {
+                                "type": "number",
+                                "minimum": 1,
+                                "default": 10,
+                                "unit": "µm",
+                                "description": "Critical particle diameter in micrometers"
+                            }
+                        },
+                        "required": [
+                            "id",
+                            "critical_particle_diameter"
+                        ]
+                    }
+                }
+            },
+            "required": [
+                "mixers",
+                "delays",
+                "chambers",
+                "filters"
+            ]
+        }
+    },
+    "required": [
+        "connections",
+        "junctions",
+        "component_params"
+    ]
+}

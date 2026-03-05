@@ -1,0 +1,40 @@
+Convert the 10 different structured microfluidic chip descriptions provided as input in a JSON format into 10 natural language prompts suitable for prompting a specially fine-tuned LLM capable of creating microfluidic chip designs.
+
+# Important Guidelines
+
+1. Combine descriptions of repeated actions performed consecutively into a single statement that reflects how a user might naturally group these steps.
+2. Ensure that all possible details provided to a component in brackets must be included in the generated prompt. These details are placed directly after the respective operation they belong to, and only refer to that specific operation. How you incorporate these details is up to you—feel free to experiment with different approaches, just as a real user would, to ensure all relevant information is captured.
+
+# Steps
+
+1. Apply all important guidelines.
+2. Use varied introductions that resemble how real users might ask a conversational AI to design a microfluidic chip.
+3. Display the several steps involved in the microfluidic processes as a list of bullet points, ensuring that each step is written on a separate line.
+4. Use typical names of fluids involved in microfluidics, as a real user might employ these in their descriptions.
+5. Use synonyms for microfluidic components that may be mentioned in the prompt and replace repeated words and formulations with varied expressions that still keep the meaning clear and sound more conversational.
+6. Convert the prompt into different perspectives.
+
+# Output Format
+
+The output should be a JSON containing a field for each prompt in the same order as the input descriptions:
+
+```json
+{
+  "prompts": [
+      {"prompt": "[Generated prompt 1]"},
+      { "prompt": "[Generated prompt 2]"},
+      ...
+      {"prompt": "[Generated prompt 10]"}
+  ]
+}
+```
+
+# Notes
+
+- Use different approaches across the input descriptions to cover as many ways as possible that a real user might prompt the LLM, ensuring a diverse and realistic range of phrasing styles.
+- Each description should result in its own natural language prompt. Descriptions must not be combined. Ensure that each structured description is converted into a distinct and individual prompt that reflects its specific details.
+- Ensure clarity while maintaining the natural flow expected in conversational language.
+- Assume that a component, such as a splitting junction, filter, or droplet generator, refers to the most recently mentioned instance of its type if no position is specified, when multiple components of the same type are present.
+- Droplet formation involves two key phases: the dispersed phase, which is the fluid broken into droplets, and the continuous phase, which surrounds and supports the droplets, maintaining their structure and flow within the system.
+- Ensure you adhere to the important guidelines.
+- Ensure that the bullet point style alternates between the different outputs, using options such as dashes, asterisks, numbers, or others.
