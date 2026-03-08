@@ -43,7 +43,7 @@ The backend communicates with two other essential services that must be running:
 
 * **Ollama (Modified Fork)**: This project uses a custom build of Ollama to handle the LLM requests with specific grammar constraints. Clone and run it by following the instructions at:
     * [Customized Ollama](Customized%20Ollama/README.md)
-    * Ensure the models specified in `application.properties` (e.g., `microfluidic_llama_3`, `microfluidic_qwen3_reasoning`) are pulled and available in your Ollama instance.
+    * Ensure the models specified in `application.properties` (e.g., `microfluidic_llama_3`, `microfluidic_qwen3_reasoning`) are pulled and available in your Ollama instance. You can find our fine-tuned models [here](https://huggingface.co/collections/TUM-EDA/flui3d-chat-models). Please refer to [Ollama's documentation](https://docs.ollama.com/import) for instructions on importing a model into Ollama.
 
 * **Frontend**: This is the Vue.js single-page application that provides the user interface. Clone and run it by following the instructions at:
     * [Frontend](Frontend/README.md)
