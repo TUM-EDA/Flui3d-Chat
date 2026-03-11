@@ -213,9 +213,6 @@
                 >
                   <font-awesome-icon icon="fa-solid fa-database" bounce size="2xl" class="mb-4" />
                   <p>Loading model...</p>
-                  <p></p>
-                  <p>Tip: Due to limited resource, sometimes you</p>
-                  <p>may need to resend your description.</p>
                 </div>
 
                 <!-- Chip Code -->
@@ -340,7 +337,6 @@
 
                   <template v-else>
                     <p>Chip synthesis failed.</p>
-                    <p class="text-sm text-stone-200 w-72">We provide only limited computational resources for testing purposes. For full performance and unrestricted synthesis capabilities, please deploy our platform on your own server.</p>
                   </template>
                 </div>
 
