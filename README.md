@@ -100,3 +100,7 @@ To build a standalone, executable JAR file for deployment, run the following com
 ./mvnw package
 ```
 The JAR file will be created in the `target/` directory.
+
+---
+### LICENSE
+Flui3d Chat is open source and licensed under the [Apache License version 2.0](https://github.com/TUM-EDA/Flui3d/blob/main/LICENSE). Please note that we reserve the right to change the license at any time without notice.
