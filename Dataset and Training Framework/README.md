@@ -16,7 +16,7 @@ This folder is part of a larger project. The other components can be found here:
 
 * **Backend**: [Backend](../Backend)
 * **Frontend**: [Frontend](../Frontend)
-* **Modified Ollama**: [Customized Ollama](../Customized Ollama)
+* **Modified Ollama**: [Customized Ollama](../Customized%20Ollama)
 * **Design Synthesis Tool**: [Design Synthesis](../Backend/designsynthesis)
 
 ---
