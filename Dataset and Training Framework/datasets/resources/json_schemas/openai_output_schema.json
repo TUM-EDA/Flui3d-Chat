@@ -1,28 +1,15 @@
 {
-  "name": "prompts_list",
+  "name": "enhanced_prompt",
   "schema": {
     "type": "object",
     "properties": {
-      "prompts": {
-        "type": "array",
-        "description": "A list of 10 generated prompts.",
-        "items": {
-          "type": "object",
-          "properties": {
-            "prompt": {
-              "type": "string",
-              "description": "One generated prompt."
-            }
-          },
-          "required": [
-            "prompt"
-          ],
-          "additionalProperties": false
-        }
+      "prompt": {
+        "type": "string",
+        "description": "The single natural-language microfluidic chip design request, rewritten from the structured description. Preserves every component, every parameter value (verbatim), every connection and every junction. Components may be referred to by their on-screen IDs (e.g. mixer_1), by ordinal, or by description, per the requested reference style."
       }
     },
     "required": [
-      "prompts"
+      "prompt"
     ],
     "additionalProperties": false
   },

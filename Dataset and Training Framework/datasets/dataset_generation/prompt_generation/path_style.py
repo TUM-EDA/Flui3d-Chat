@@ -43,7 +43,18 @@ class PathOrientedPromptGenerator(StructuralPromptGenerator):
         Generates a path-oriented prompt set for a single graph.
         """
         # Generate the core path-based description from the graph representation.
-        core_description, processed_graph = self._generate_core_description(graph)
+        core_description, processed_graph, ordered_edges = self._generate_core_description(graph)
+
+        # Record the order the prose narrates each connection (`ordered_edges`, a list of
+        # (source, target) node pairs from walking the paths) on the (original) graph, so the JSON
+        # converter lists `connections` in that exact order. This is EDGE-based, not node-based: a
+        # node can be introduced early as a path endpoint (e.g. a filter that ends one path) yet have
+        # its own out-edges narrated much later in separate paths, which a per-node order cannot
+        # express (it would group all of a node's out-edges right after the node). Walking the paths
+        # also sees the droplet generators / second-position filters the prose leaves unnamed, so
+        # every edge lands at its true narration position. Only reorders the JSON; the prompt text is
+        # untouched.
+        graph.graph["connection_reading_order"] = ordered_edges
 
         # Count the number of each type of component in the chip.
         module_counts = self._get_module_counts(processed_graph)
@@ -99,16 +110,14 @@ class PathOrientedPromptGenerator(StructuralPromptGenerator):
         It also applies certain constraints to ensure the paths are realistic for microfluidic processes.
         """
         def is_valid_path(path):
-            # Checks if a generated path follows specific rules for certain components.
+            # Checks if a generated path follows positional rules for certain components.
             if len(path) < 2: return False
             for i, node in enumerate(path):
-                # A droplet generator can only be at the start, second, or end position in a path.
+                # Droplet generators and filters read naturally only at a path boundary
+                # (start, second, or last node), so they are never buried mid-path. In v2 a
+                # droplet generator is a single-input/single-output component, so the old
+                # "dispersed phase inlet" entry constraint no longer applies.
                 if node.startswith("droplet_") and not (i in (0, 1) or i == len(path) - 1): return False
-                # If a droplet generator is the second node, it must be connected via its "dispersed" phase inlet.
-                if node.startswith("droplet_") and i == 1 and i != len(path) - 1:
-                    edge_data = graph.get_edge_data(path[i - 1], node)
-                    if edge_data.get("droplet_connection_type") != "dispersed": return False
-                # A filter has the same positional constraints as a droplet generator.
                 if node.startswith("filter_") and not (i in (0, 1) or i == len(path) - 1): return False
             return True
 
@@ -143,30 +152,53 @@ class PathOrientedPromptGenerator(StructuralPromptGenerator):
                     covered_edges.add((u, v))
         return paths
 
-    def _generate_path_descriptions(self, graph: nx.DiGraph, paths: List[List[str]]) -> str:
+    def _generate_path_descriptions(self, graph: nx.DiGraph, paths: List[List[str]]) -> Tuple[str, List[Tuple[str, str]]]:
         """
         This method converts the list of paths (which are lists of node names) into natural language sentences.
         It uses a set of templates to handle different types of paths, especially those involving special components like filters and droplet generators.
+
+        Only DLD filters expose size-sorted output ports (``filter_connection_type`` =
+        ``smaller``/``larger``); single-output pillar-matrix filters and every other component
+        carry no port label and are narrated as ordinary pass-through nodes. In v2 a droplet
+        generator has a single input/output, so it no longer carries a phase-inlet label.
+
+        Returns the joined description and the narration-order edge list: every (source, target)
+        node pair, in the order it first appears while walking the paths in the SAME sorted order the
+        prose uses. These pairs are the (junction-free) connections, so the caller can hand them to
+        the JSON converter to list connections in prose order; see ``connection_reading_order``.
         """
         descriptions_with_deps = []
 
+        def port(u: str, v: str) -> str:
+            """The size-sorted output label of a DLD filter edge, or None for any other edge."""
+            return (graph.get_edge_data(u, v) or {}).get("filter_connection_type")
+
+        def stream(label: str) -> str:
+            """Phrases a DLD output fraction as a particle-stream noun.
+
+            A single fraction renders as e.g. "smaller particles". A compound label
+            ("smaller and larger") arises when both of a filter's outputs recombine
+            downstream (junction collapse merges the two ports onto one edge); it renders
+            as "both particle fractions" so the recombination is still conveyed without the
+            awkward "smaller and larger particles ..." doubling (and its "... of larger
+            particles" stacking when the filter feeds another filter).
+            """
+            return "both particle fractions" if " and " in label else f"{label} particles"
+
         for path in paths:
             current_desc = ""
-            
-            # --- Path Start Logic ---
-            # This block handles how the description of a path begins, with special templates for filters and droplet generators.
-            if path[0].startswith("filter_"):
-                # Case: Path starts with a filter.
-                if len(path) > 1:
-                    edge_data = graph.get_edge_data(path[0], path[1], {})
-                    f_type = edge_data.get("filter_connection_type")
-                    current_desc = f"{f_type} particles from {path[0]}"
+            start_port = port(path[0], path[1]) if len(path) > 1 else None
+            second_port = port(path[1], path[2]) if len(path) > 2 else None
 
+            # --- Path Start Logic ---
+            # Special templates apply only to DLD filters (which carry a size-sorted port) and to
+            # droplet generators; pillar-matrix filters and everything else fall to the general case.
+            if path[0].startswith("filter_") and start_port:
+                # Case: Path starts at a DLD filter, following one of its size-sorted outputs.
+                current_desc = f"{stream(start_port)} from {path[0]}"
                 if len(path) > 2:
-                    if path[1].startswith("filter_"):
-                        edge_data = graph.get_edge_data(path[1], path[2], {})
-                        f_type = edge_data.get("filter_connection_type")
-                        current_desc = f"{f_type} particles of {current_desc}"
+                    if path[1].startswith("filter_") and second_port:
+                        current_desc = f"{stream(second_port)} of {current_desc}"
                         if len(path) > 3: current_desc += "".join(f" through {node}" for node in path[2:-1])
                     elif path[1].startswith("droplet_"):
                         current_desc = f"drops_replace made of {current_desc}"
@@ -174,44 +206,61 @@ class PathOrientedPromptGenerator(StructuralPromptGenerator):
                     else:
                         current_desc += "".join(f" through {node}" for node in path[1:-1])
 
-            elif len(path) > 2 and path[1].startswith("filter_"):
-                # Case: Filter is the second node in the path.
-                edge_data = graph.get_edge_data(path[1], path[2], {})
-                f_type = edge_data.get("filter_connection_type")
-                current_desc = f"{f_type} particles from {path[0]}"
+            elif len(path) > 2 and path[1].startswith("filter_") and second_port:
+                # Case: A DLD filter is the second node. This phrasing deliberately leaves the
+                # filter unnamed (for prompt variety): "particles OF THE FLUID from <X>" attributes
+                # the size split to the fluid, not to <X>, so it no longer reads as if <X> itself
+                # sorted the particles, while the separation stays implicit.
+                current_desc = f"{stream(second_port)} of the fluid from {path[0]}"
                 if len(path) > 3: current_desc += "".join(f" through {node}" for node in path[2:-1])
 
             elif len(path) > 2 and path[1].startswith("droplet_"):
-                # Case: Droplet generator is the second node in the path.
+                # Case: Droplet generator is the second node; the path carries the droplets it forms.
                 start_desc = f"fluid entering {path[0]}" if path[0].startswith("inlet_") else f"fluid exiting {path[0]}"
                 current_desc = f"guide drops_replace made from {start_desc}"
                 if len(path) > 3: current_desc += "".join(f" through {node}" for node in path[2:-1])
 
-            else:  # General path case
+            else:  # General path case (incl. single-output pillar-matrix filters and tesla valves).
                 current_desc = f"from {path[0]}"
                 if len(path) > 2: current_desc += "".join(f" through {node}" for node in path[1:-1])
 
             # --- Path End Logic ---
-            # This block handles how the description of a path ends.
+            # Every component is entered the same way; a droplet generator no longer has a
+            # phase-specific inlet in v2, so the path simply ends "to <node>".
             if len(path) > 1:
-                if path[-1].startswith("droplet_"):
-                    # Case: Path ends at a droplet generator.
-                    edge_data = graph.get_edge_data(path[-2], path[-1], {})
-                    d_type = edge_data.get("droplet_connection_type")
-                    current_desc += f" to {d_type} phase inlet of {path[-1]}"
-                else:
-                    current_desc += f" to {path[-1]}"
+                current_desc += f" to {path[-1]}"
 
             ancestor_count = len(nx.ancestors(graph, path[0]))
-            descriptions_with_deps.append((ancestor_count, current_desc))
+            descriptions_with_deps.append((ancestor_count, path, current_desc))
 
         # --- Final Sorting and Joining ---
-        # Sort the path descriptions based on their dependencies to create a logical flow.
+        # Sort the path descriptions based on their dependencies to create a logical flow. The key is
+        # only the ancestor count (a stable sort keeps ties in discovery order); never compare the
+        # path lists themselves.
         descriptions_with_deps.sort(key=lambda x: x[0])
-        return ". ".join(desc for _, desc in descriptions_with_deps)
 
-    def _generate_core_description(self, graph: nx.DiGraph) -> Tuple[str, nx.DiGraph]:
-        """Generates a path-based description of the chip's functionality."""
+        # Narration-order edge list: first appearance of each (source, target) pair while walking the
+        # sorted paths edge by edge. Unlike a text scan, this walk sees the droplet generators /
+        # second-position filters the prose leaves unnamed, placing each edge at its true position in
+        # the flow; and being edge-level it keeps a node's out-edges where they are actually narrated
+        # rather than grouped at the node's first mention.
+        ordered_edges: List[Tuple[str, str]] = []
+        seen = set()
+        for _, path, _ in descriptions_with_deps:
+            for edge in zip(path, path[1:]):
+                if edge not in seen:
+                    seen.add(edge)
+                    ordered_edges.append(edge)
+
+        description = ". ".join(desc for _, _, desc in descriptions_with_deps)
+        return description, ordered_edges
+
+    def _generate_core_description(self, graph: nx.DiGraph) -> Tuple[str, nx.DiGraph, List[Tuple[str, str]]]:
+        """Generates a path-based description of the chip's functionality.
+
+        Returns the description, the junction-free processed graph, and the narration-order edge list
+        (used to order the JSON connections in prose order; see ``connection_reading_order``).
+        """
 
         # First, remove junction nodes from the graph to create paths that describe the conceptual flow between functional components.
         processed_graph = self._remove_junction_nodes(graph)
@@ -219,6 +268,7 @@ class PathOrientedPromptGenerator(StructuralPromptGenerator):
         # Find a set of random paths that cover all the connections in the simplified graph.
         paths = self._find_random_paths(processed_graph)
 
-        # Convert these paths into a single string of natural language descriptions.
-        description = self._generate_path_descriptions(processed_graph, paths)
-        return description, processed_graph
+        # Convert these paths into a single string of natural language descriptions plus the
+        # narration-order edge walk.
+        description, ordered_edges = self._generate_path_descriptions(processed_graph, paths)
+        return description, processed_graph, ordered_edges

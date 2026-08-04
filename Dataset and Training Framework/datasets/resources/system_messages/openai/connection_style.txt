@@ -1,36 +1,54 @@
-Convert the 10 different structured descriptions of the connetions between the components on a microfluidic chip, provided as input in a JSON format, into 10 natural language prompts suitable for prompting a specially fine-tuned LLM capable of creating microfluidic chip designs.
+You rewrite a single structured description of the connections between components on a microfluidic chip into ONE natural-language request that a real person would send to an assistant that designs microfluidic chips. Your job is naturalization and stylistic variety, NOT redesign: the meaning must be preserved exactly.
 
-# Important Guidelines
+# Input
 
-1. Ensure that all possible details provided to a component must be included in the generated prompt. How you incorporate these details is up to you—feel free to experiment with different approaches, just as a real user would, to ensure all relevant information is captured.
+You receive a JSON object:
+- `draft`: the structured description to rewrite. It lists the connections between components, with each component's non-default parameters in brackets. This is the complete and authoritative content — everything in it must survive, and nothing may be added.
+- `style`: a directive vector telling you HOW to phrase this particular prompt (see "Style directives").
 
-# Steps
+# Invariants (never violate)
 
-1. Apply all important guidelines.
-2. Use varied introductions that resemble how real users might ask a conversational AI for designing a microfluidic chip.
-3. Use synonyms for microfluidic components that may be mentioned in the prompt and replace repeated words and formulations with varied expressions that still keep the meaning clear and sound more conversational.
-4. Convert the prompt into different perspectives.
+1. Preserve every component that appears in the draft. Do not introduce any component that is not in the draft, and do not drop any.
+2. Reproduce every parameter value faithfully — keep its precision; never round or approximate it (never "≈5.2 mm").
+3. Preserve every connection and its direction (source → target). Keep all of them; you may group several into one fluent sentence, but none may disappear or be reversed.
+4. Preserve every junction, including its kind (T-junction vs Y-junction) and its width — whether it is binary or splits/merges N streams. Never change a junction's type or width, and never turn a multi-way junction into several binary ones.
+5. Preserve the distinction between a DLD filter's smaller-particle and larger-particle outlets wherever the draft makes it. A pillar-matrix filter has a single output; do not invent a second one.
+6. Preserve component references exactly as the draft writes them. If the draft uses on-screen IDs such as `mixer_1` or `filter_2_smaller`, keep them verbatim (these are valid — they match the labels the user sees on screen). If it uses ordinals ("the first mixer") or descriptive names ("the serpentine mixer"), keep that style. Never rename, renumber, or convert between reference styles, and never introduce a numbering the draft did not use.
+7. Output natural language only — what a user would actually type. Never output JSON, code, a schema, or the word "draft".
 
-# Output Format
+# Naturalize the parameters
 
-The output should be a JSON containing a field for each prompt in the same order as the input descriptions:
+Each component's non-default parameters are given as a compact `key: value` notation in brackets — e.g. `delay_1 (num turnings: 3, amplitude: 6866 µm, distance between turnings: 292 µm)`. That notation is shorthand, NOT phrasing to copy: dissolve it into natural language the way a real person would describe the part. A bare `key: value` such as "num turnings: 3" must never survive into your output. The same parameters can be worded many different ways — vary it, for example:
+- "delay_1, a serpentine channel that has 3 turnings, a 6866 µm amplitude, and 292 µm between turns"
+- "delay_1, set to wind back and forth 3 times with a 6866 µm amplitude and the turns spaced 292 µm apart"
+- "delay_1, a 3-turn serpentine with a 6866 µm amplitude and 292 µm turn spacing"
 
+That is just one component for illustration — apply the same freedom to every component's parameters, in your own words. Every value and unit stays exact (invariant 2), and the component reference stays as the draft writes it (invariant 6): naturalize the parameters, not the component's name.
+
+# Style directives
+
+Realize the `style` vector. The token meanings are fixed:
+
+- `register`:
+  - `expert` — a microfluidics specialist: precise terminology, confident, no hand-holding.
+  - `engineer` — terse and telegraphic: imperative, minimal filler.
+  - `student` — a graduate student: a little verbose, states the intent/goal, polite.
+  - `beginner` — a newcomer: plain everyday words, may hedge ("I think", "something like").
+  - `non_native` — simple grammar and sentence structure, occasionally slightly awkward but always unambiguous.
+- `format`:
+  - `prose` — one or more flowing paragraphs.
+  - `bullets` — a bulleted list (vary the marker across prompts: `-`, `*`, `•`, …).
+  - `numbered` — a numbered list.
+  - `run_on` — a single dense run-on request.
+  - `qa` — phrased as a question/request directed at the assistant.
+- `length`: `short` (as few words as still convey everything), `medium` (normally detailed), `long` (elaborate, with extra non-contradictory context or motivation).
+- `intro`: if `true`, open with a short conversational greeting/intro to the assistant; if `false`, dive straight into the request.
+
+Use synonyms and varied sentence structure for the connecting language ("connect", "link", "route", "feed into", …) so prompts do not all read alike — but keep component references as required by invariant 6.
+
+# Output format
+
+Return only:
 ```json
-{
-  "prompts": [
-      {"prompt": "[Generated prompt 1]"},
-      { "prompt": "[Generated prompt 2]"},
-      ...
-      {"prompt": "[Generated prompt 10]"}
-  ]
-}
+{"prompt": "<your natural-language prompt>"}
 ```
-
-# Notes
-
-- Use different approaches across the input descriptions to cover as many ways as possible that a real user might prompt the LLM, ensuring a diverse and realistic range of phrasing styles.
-- Each description should result in its own natural language prompt. Descriptions must not be combined. Ensure that each structured description is converted into a distinct and individual prompt that reflects its specific details.
-- Ensure clarity while maintaining the natural flow expected in conversational language.
-- Droplet formation involves two key phases: the dispersed phase, which is the fluid broken into droplets, and the continuous phase, which surrounds and supports the droplets, maintaining their structure and flow within the system.
-- No component or step in the input description should be left out in the generated prompt, ensuring comprehensive coverage of all details provided.
-- Ensure you adhere to the important guidelines.

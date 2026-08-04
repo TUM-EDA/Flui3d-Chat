@@ -1,42 +1,57 @@
-Convert the list of multiple paths through components on a microfluidic chip, provided as input, into a microfluidic assay suitable for prompting a specially fine-tuned LLM capable of creating microfluidic chip designs. The prompt should be constructed step by step and should align in style with the examples provided in the example section, following the steps outlined below.
+You rewrite a single structured description of the flow paths through a microfluidic chip into ONE natural-language request, framed as a concrete real-world microfluidic assay, that a real person would send to an assistant that designs microfluidic chips. Aim for natural, varied, human phrasing — a researcher describing their assay, not a rigid transcription. Your job is naturalization, realistic assay framing, and stylistic variety, NOT redesign: the chip's structure must be preserved exactly, even though you are free in how you word it and how you refer to its parts.
 
-# Steps
+# Input
 
-1. Randomly select 10 different existing microfluidic assays with a scientific name from your knowledge. Examples include the ChIP (Chromatin Immunoprecipitation) assay and a ctDNA/SPM separation assay. Ensure the names of the selected assays are explicitly written in the output.
-2. From these, pick the {random number} assay, and ensure the names of the solutions, cells, and other materials used in that assay (such as DPBS, MNase, ctDNA, SPM particles, etc., which are only examples from the given assays) are also explicitly written in the output together with the name of the chosen assay.
-3. Craft a varied introduction for the prompt that mimics how real users might request a conversational AI to design a microfluidic chip, incorporating the name of the microfluidic assay you selected.
-4. Go through the sentences in the input starting with "from", "smaller/larger particles from", or "guide droplets made from", where each sentence represents one path. Every path should correspond to one indivdual step of the assay. Convert each of these paths into a separate part of the output prompt:
-  - Replace all unspecific terms like 'droplets,' 'fluid,' and 'particles' with the names you kept in mind for your selected microfluidic assay, ensuring they fit the context of the current path based on the overall details of the assay.
-  - Retain the names of the microfluidic components.
-  - Example based on the examples provided in the example section:
-    a. Input: "From inlet 1 to mixer 1." Output: "Load cells through inlet 1 into mixer 1."
-    b. Input: "From inlet 8 through mixer 1 to mixer 2." Output: "Flow DPBS from inlet 8 to flush the fluids in mixer 1 to mixer 2."
-5. Extract any relevant details of the microfluidic components, such as their functions, specifications, or any other attributes mentioned in the remaining sentences and integrate them into the input. How you incorporate these details is up to you—feel free to experiment with different approaches, just as a real user would, to ensure all relevant information is captured.
+You receive a JSON object:
+- `draft`: the structured description to rewrite. It is a list of flow paths through the chip. Each path is one sentence beginning with "from …", "smaller/larger particles from …", or "guide droplets made from …", and corresponds to one step of the assay. Component parameters are given as trailing sentences ("… should have …"). This is the complete and authoritative content — every component, path and parameter in it must survive, and nothing may be added.
+- `assay_domain`: the real-world application area to frame this prompt around (e.g. "droplet digital PCR").
+- `style`: a directive vector telling you HOW to phrase this particular prompt (see "Style directives").
 
-# Example Section
+# How to build the prompt
+
+1. Within `assay_domain`, invent a plausible, specific real microfluidic assay and name it explicitly (e.g. for "droplet digital PCR": a ddPCR-based rare-mutation quantification assay). Use real, domain-appropriate terminology.
+2. Decide on the concrete materials that assay uses — solutions, cells, buffers, reagents, particles (e.g. DPBS, lysis buffer, MNase, ctDNA, SPM beads, primer mix, oil). Prefer several distinct materials where natural.
+3. Open with a varied introduction that names the assay and asks for a chip design for it.
+4. Convert each path into its own step of the prompt: replace generic terms ("fluid", "droplets", "particles", "the solution") with the materials you chose, fitting each path's role in the overall assay.
+   - Refer to each component in whatever way reads most naturally for the assay: by its on-screen label (`mixer_1`), by an ordinal or position ("the first mixer"), or by its function or region of the chip ("the mixing chamber", "the separation stage", "the next part of the channel"). You do NOT have to reuse the draft's exact wording — say what a real person would say. Just keep each reference unambiguous and make sure every component and path still appears.
+   - "Guide droplets made from [component] through/to …" means droplets are FORMED from the fluid coming out of that component and then routed onward; render it that way.
+   - Parameters arrive as trailing "… should have num turnings: 7, amplitude: 6246 µm, …" sentences. That `key: value` form is shorthand — fold the values into the assay description in your own natural words; never copy a bare "num turnings: 7". The same parameters can be worded many ways, e.g. "should have num turnings: 7, amplitude: 6246 µm, distance between turnings: 140 µm" could become:
+     - "a serpentine channel that has 7 turnings, a 6246 µm amplitude, and 140 µm between turns"
+     - "routed through a 7-turn mixing serpentine at a 6246 µm amplitude, the turns 140 µm apart"
+     - "a 7-turn delay loop with a 6246 µm amplitude and 140 µm turn spacing"
+     Apply the same freedom to every component's parameters. Every value and unit stays exact (invariant 3).
+5. Keep the assay alive in EVERY step, not just the opening. Each path is a stage of the protocol — name what that step accomplishes for the assay in real domain language (e.g. "the conditioned cardiomyocytes settle in the culture chamber and shed their secretome", "the EV-rich fraction is encapsulated into droplets for downstream readout") and carry the chosen materials forward from step to step, so the request reads as a genuine assay protocol rather than a wiring list topped with a single assay sentence. This adds NOTHING structural: every path still maps one-to-one to a step, with no new component, inlet, outlet, junction, or step — you are only dressing each existing path in its assay meaning.
+
+# Invariants (never violate)
+
+1. Only the components in the draft exist. Add no steps, no components, and no extra inlets/outlets; drop none.
+2. Preserve every flow path and its direction exactly. Keep all of them.
+3. Reproduce every parameter value faithfully — keep its precision; never round or approximate it (never "≈5.2 mm").
+4. Preserve every junction (T-junction vs Y-junction) and its width, and the smaller/larger-particle outlet distinction of any DLD filter; a pillar-matrix filter has a single output. (You may convey these functionally — e.g. "the larger cells are diverted …" — instead of naming a port.)
+5. Droplet generators take one input and produce droplets; the continuous/carrier phase is implicit. Do NOT describe a separate continuous-phase inlet or a second droplet input.
+6. Keep the component set exact: the same components, the same count, and the same connectivity as the draft. You are free to NAME or refer to each component however reads naturally (label, ordinal, or functional/region description) — but that freedom never extends to adding, dropping, merging, splitting, or renumbering components.
+7. The assay framing decorates the given paths — it must never imply a component, inlet, outlet or step that is not in the draft.
+8. Output natural language only. Never output JSON, code, a schema, or the word "draft".
+
+# Style directives
+
+Realize the `style` vector (token meanings are fixed):
+- `register`: `expert` (specialist, precise), `engineer` (terse, imperative), `student` (verbose, states intent, polite), `beginner` (plain words, may hedge), `non_native` (simple grammar, occasionally awkward but unambiguous). Note: assay prompts are inherently expert-flavored; still bias wording toward the requested register.
+- `format`: `prose`, `bullets` (vary the marker), `numbered`, `run_on`, `qa`.
+- `length`: `short` / `medium` / `long`.
+- `intro`: if `true`, open with a conversational greeting before naming the assay; if `false`, lead directly with the assay request.
+
+# Examples (inspiration only — never copy)
+
+These show the natural, real-world tone to aim for and how freely components may be referred to. Example 1 names components plainly ("inlet 1", "mixers 2, 3, and 4"); example 2 never labels a single component — it describes each one by its function or its part of the channel. Both are equally valid. Draw on them only for tone and phrasing; never reuse their assay, materials, components, or steps unless the draft actually calls for them.
 
 1. Design a microfluidic chip for a ChIP assay. Load cells through inlet 1 into mixer 1. Rinse the cells in mixer 1 by flowing DPBS from inlet 1 into mixer 1. All excess fluids exit mixer 1 via outlet 1. Load buffer fluids from inlet 2 through the mixer to outlet 2. Mix the buffer fluids with the cells in mixer 1. Load MNase into mixer 1 from inlet 3. Mix the cells with MNase in mixer 1. Load buffer fluids to mixer 1 from inlet 4. Rinse mixers 2, 3, and 4 by flowing beads through inlets 5, 6 and 7 to outlets 3, 4, and 5. Flow DPBS from inlet 8 to flush the fluids in mixer 1 to mixers 2, 3 and 4.
+
 2. Create a microfluidic design for the separation of ctDNA from SPM particles. First, ctDNA could be separated from platelets before entering the next part of the microchannel. Second, an inlet was designed at the other end of the microchannel, especially for the input of SPM particles. The ctDNA and SPM particles moved to the second part of the curved microchannel, which was designed for the effective mixing of particles. When the ctDNA was fully hybrid with the SPM beads, it could be effectively attached or absorbed to the SPM beads. When the solution was moved to the third part of the microfluidic channel, the SPM particles were separated from ctDNA. The ctDNA could be collected in the outlet channel.
 
-# Output Format
+# Output format
 
-Scientific names of the 10 different assays:
-
-Names of the solutions, cells, and other materials needed for one of these assays:
-
-Output prompt:
+Return only:
 ```json
-{
-  "prompt": "[Your natural-sounding prompt here]"
-}
+{"prompt": "<your natural-language prompt>"}
 ```
-
-# Notes 
-
-- Each microfluidic assay should be created individually and with creativity, utilizing the full range of knowledge about microfluidics.
-- Try using multiple distinct solutions and/or cell types for a single assay.
-- The prompt should be written in a way that is only understandable to microfluidic experts. Write with the language and terminology of a microfluidics expert.
-- Only the components mentioned in the input are available for use.
-- When the phrase 'Guide droplets made from [component] through/to'  is used, it means that droplets are formed from the fluid coming from the specified component and then guided through/to the subsequent components on the path.
-- Ensure that all unspecified names are replaced with the names of the solutions, cells, and other materials specified in the output.
-- Ensure that all component details are included in the prompt.

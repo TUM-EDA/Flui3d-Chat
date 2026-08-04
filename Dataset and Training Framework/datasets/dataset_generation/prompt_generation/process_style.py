@@ -1,7 +1,6 @@
 import random
 import re
-from itertools import groupby
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import networkx as nx
 
@@ -10,7 +9,24 @@ from .prompt_generation import PromptGenerator
 class ProcessOrientedPromptGenerator(PromptGenerator):
     """Generates prompts describing the processes occurring on the chip."""
 
-    # A dictionary of synonyms for various actions to make the prompts sound more varied.
+    # Ordinal words for naming fluids/streams/filters ("the second filter"). Shared by
+    # _number_prefix, _ordinal_index and the _canonicalize_reading_order relabel.
+    ORDINAL_WORDS = ["first", "second", "third", "fourth", "fifth",
+                     "sixth", "seventh", "eighth", "ninth", "tenth"]
+
+    # Per-design counts of splits / DLD filters / droplet generators, (re)set at the top of
+    # _generate_for_single_graph. When >=2 of a kind are in play a bare "the first stream" / "the
+    # larger particle stream" / "the droplets" is ambiguous, so every such reference is anchored to
+    # its split/filter/source fluid; see _split_possessive, _particle_stream_label and the droplet
+    # branch of _handle_linear_subgraph.
+    _n_splits = 0
+    _n_dld = 0
+    _n_droplets = 0
+
+    # Action verb synonyms, chosen once per prompt for consistency. The "separate smaller
+    # and larger particles of" family is reserved for DLD filters (two size-sorted outputs);
+    # the single-output pillar-matrix filter has its own "filter out particles" verb so the
+    # two filter types stay distinguishable in prose. "direct" is the tesla-valve verb.
     ACTION_SYNONYMS = {
         "let react": ["let react", "initiate a reaction", "allow to react"],
         "mix": ["mix", "blend", "homogenize"],
@@ -19,11 +35,40 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
         "delayed": ["delayed", "held", "retained"],
         "combine": ["combine", "merge", "join", "unite"],
         "split": ["split", "divide", "separate", "distribute", "segment"],
-        "separate smaller and larger particles of": ["separate smaller and larger particles of", "filter", "separate particles of", "filter particles of", "divide smaller and larger particles of", "split smaller and larger particles of", "sieve", "sieve particles of"],
+        "separate smaller and larger particles of": ["separate smaller and larger particles of", "separate the smaller and larger particles of", "sort by size the particles of", "divide smaller and larger particles of", "fractionate by size the particles of", "size-separate the particles of"],
+        "filter out particles": ["filter out particles", "remove particles", "sieve out particles", "strain out particles", "screen out particles", "separate out particles"],
+        "direct": ["direct", "route", "guide", "channel", "pass"],
         "form droplets": ["form droplets", "generate droplets", "produce droplets", "form microdroplets", "generate microdroplets", "produce microdroplets"],
         "droplet formation": ["droplet formation", "droplet generation", "droplet production", "microdroplet formation", "microdroplet generation", "microdroplet production"],
         "smaller particle stream": ["smaller particle stream", "smaller particle flow", "flow with smaller particles", "stream with smaller particles"],
         "larger particle stream": ["larger particle stream", "larger particle flow", "flow with larger particles", "stream with larger particles"]
+    }
+
+    # Natural-language phrasing of each v2 component parameter, used to surface NON-default
+    # (deliberately randomized) values inside a "(using ... with ...)" aside. Defaults are
+    # suppressed, matching the structural styles. Keyed by the v2 attribute name; "{v}" is the
+    # value. Iterated in this order, so a component's params read in a stable, logical sequence.
+    # "{s}" expands to a plural "s" unless the value is 1 (so "1 turning", "4 turnings"); it is
+    # ignored by phrasings that do not use it.
+    PARAM_PHRASING = {
+        "num_turnings": "{v} turning{s}",
+        "amplitude_um": "{v} µm amplitude",
+        "distance_between_turnings_um": "{v} µm between turnings",
+        "diameter_um": "{v} µm diameter",
+        "num_circles": "{v} circle{s}",
+        "distance_between_circles_um": "{v} µm between circles",
+        "length_um": "{v} µm length",
+        "width_um": "{v} µm width",
+        "post_shape": "{v}-shaped posts",
+        "post_diameter_um": "{v} µm post diameter",
+        "columns": "{v} column{s}",
+        "rows": "{v} row{s}",
+        "row_shift_fraction": "a row shift fraction of {v}",
+        "critical_particle_diameter_um": "{v} µm critical particle diameter",
+        "num_segment_pairs": "{v} segment pair{s}",
+        "segment_length_um": "{v} µm segment length",
+        "segment_width_um": "{v} µm segment width",
+        "nozzle_width_um": "{v} µm nozzle width",
     }
 
     # A list of introductory phrases to start the prompts.
@@ -49,16 +94,59 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
         
         # This style uses its own specific logic to pre-process the graph, merging adjacent junctions.
         processed_graph = self._replace_combining_and_splitting_units(graph)
+        if processed_graph is None:
+            # Merging adjacent same-function junctions collapsed two routes onto one edge
+            # (rare; e.g. a source feeding the same merge group twice). Fall back to treating
+            # every junction as its own conceptual unit, which never collapses an edge.
+            processed_graph = self._replace_combining_and_splitting_units(graph, merge_adjacent=False)
+
+        # How many distinct splits / DLD filters / droplet generators the narration will describe.
+        # With >=2 of a kind, "the first stream" / "the larger particle stream" / "the droplets" could
+        # belong to more than one of them, so every such reference is anchored to its split/filter/source
+        # fluid (_split_possessive, _particle_stream_label, droplet branch of _handle_linear_subgraph);
+        # with <=1 there is no ambiguity and references stay bare and natural.
+        self._n_splits = sum(1 for n in processed_graph.nodes if n.startswith("splitting"))
+        self._n_dld = sum(1 for n in processed_graph.nodes
+                          if n.startswith("filter") and processed_graph.nodes[n].get("type") == "dld")
+        self._n_droplets = sum(1 for n in processed_graph.nodes if n.startswith("droplet"))
 
         # Convert the processed graph into a single node that contains the full textual description of the process.
         output_node = self._graph_to_text(processed_graph, detailed=detailed)
-        action_description = list(output_node.nodes(data=True))[0][1].get("action", "")
+        output_data = list(output_node.nodes(data=True))[0][1]
+        action_description = output_data.get("action", "") + (output_data.get("outlet_token") or "")
+
+        # Record each node's narration position as a `reading_index` attribute BEFORE the renumber
+        # passes strip the markers, so the JSON converter can list connections in prompt order. The
+        # attribute rides through the id relabels below (relabel_nodes preserves node data).
+        self._assign_reading_index(graph, action_description)
+
+        # Renumber component IDs into the order the narration introduces them, so the prose reads in
+        # sequence and every reference points at exactly that node in the JSON built from this graph.
+        # All passes mutate `graph` in place (its IDs are the JSON's). Outlets run first because that
+        # pass also strips the internal @@OUTLET@@ markers; the inlet/filter pass then works on clean
+        # text (those carry a spoken ordinal to rewrite too); the pass-through pass renumbers the
+        # remaining components (mixer/delay/chamber/droplet/tesla_valve), which carry no spoken
+        # ordinal, so their JSON ids alone ascend in reading order -- e.g. the second tesla valve
+        # narrated becomes tesla_valve_2, not tesla_valve_4.
+        action_description = self._renumber_outlets_by_reading_order(graph, action_description)
+        action_description = self._canonicalize_reading_order(graph, action_description)
+        action_description = self._renumber_passthrough_by_reading_order(graph, action_description)
 
         # Refine and augment description
         action_description = self._modify_combine_mix_pairs(action_description)
         action_description = self._modify_combine_react_pairs(action_description)
-        action_description = self._replace_with_random_synonym(action_description, self.MODULE_SYNONYMS)
+        # Action verbs are synonymized BEFORE module nouns: the verb "delay" and the noun
+        # "delay channel" share the word "delay", so resolving nouns first would let the verb
+        # pass corrupt the noun ("retain channel"). While the noun is still a "<cat>_synonym"
+        # token its trailing "_" blocks the verb regex's word boundary, so verbs are replaced
+        # but noun tokens are not; the nouns are then resolved and never seen by the verb pass.
         action_description = self._replace_with_random_action_synonyms(action_description)
+        action_description = self._replace_with_random_synonym(action_description, self.MODULE_SYNONYMS)
+        action_description = self._dedupe_filter_phrasing(action_description)
+        # Resolve the split anchors LAST: each "@@SPLITPOSS@@" becomes "the Nth split's" with N in
+        # the order the splits were introduced. Done after the synonym passes so the literal noun
+        # "split" is never mistaken for the "split" action verb and synonymised away.
+        action_description = self._resolve_split_anchors(action_description)
         action_description = re.sub(r'\s+', ' ', action_description).strip()
         action_description = re.sub(r',\s*([A-Z])', lambda m: f", {m.group(1).lower()}", action_description)
 
@@ -72,18 +160,27 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
         )
     
     # --- The following methods contain the complex, recursive logic specific to this process-oriented style ---
-    def _replace_combining_and_splitting_units(self, graph: nx.DiGraph) -> Optional[nx.DiGraph]:
+    def _replace_combining_and_splitting_units(self, graph: nx.DiGraph, merge_adjacent: bool = True) -> Optional[nx.DiGraph]:
         """
-        Pre-processes the graph by merging adjacent combining or splitting junctions
-        into single conceptual units. This simplifies the graph structure before the main
-        text generation logic, as described in the thesis.
-        
+        Pre-processes the graph by collapsing combining or splitting junctions into single
+        conceptual "units". A merge of N inputs / split into N outputs becomes one operation
+        in the process narration, regardless of how many physical T/Y-junctions implement it.
+
+        With ``merge_adjacent`` (default) a maximal group of touching same-function junctions
+        becomes one unit ("combine 4 fluids"). With it disabled each junction becomes its own
+        unit; this never collapses two routes onto one edge, so it is the safe fallback when
+        merging would (the caller retries with it off).
+
+        Each unit records ``junction_specs``: the ``(width, T/Y-shape)`` of every junction it
+        absorbed, so the hardware aside can still name them (e.g. "a 3-way fork").
+
         Args:
             graph: The input microfluidic chip graph.
-        
+            merge_adjacent: Whether to fuse touching same-function junctions into one unit.
+
         Returns:
-            A new graph with junction groups replaced by single nodes, or None if an
-            invalid structure is detected.
+            A new graph with junctions replaced by unit nodes, or None if merging collapsed
+            the edge count (only possible when ``merge_adjacent`` is True).
         """
         graph = graph.copy()
         edge_count = len(graph.edges())
@@ -92,17 +189,20 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
             # Helper function to replace a group of nodes with a single new node,
             # consolidating their connections and attributes.
             nonlocal edge_count
-            graph.add_node(new_node_name, junction_types=[])
-            
+            # Capture each junction's width and T/Y shape BEFORE any rewiring: adding edges to
+            # the new unit would otherwise inflate the in/out-degree of group members.
+            specs = [(max(graph.in_degree(n), graph.out_degree(n)), graph.nodes[n]["type"])
+                     for n in sorted(nodes_to_replace)]
+            graph.add_node(new_node_name, junction_specs=specs)
+
             for node in sorted(nodes_to_replace):
-                graph.nodes[new_node_name]["junction_types"].append(graph.nodes[node]["type"])
                 for pred in graph.predecessors(node):
                     if pred != new_node_name:
                         graph.add_edge(pred, new_node_name, **graph.get_edge_data(pred, node, {}))
                 for succ in graph.successors(node):
                     if succ != new_node_name:
                         graph.add_edge(new_node_name, succ, **graph.get_edge_data(node, succ, {}))
-            
+
             edge_count -= (len(nodes_to_replace) - 1)
             graph.remove_nodes_from(nodes_to_replace)
 
@@ -112,18 +212,22 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
             counter = 1
             for node_name, attributes in list(graph.nodes(data=True)):
                 if node_name not in visited_nodes and node_name.startswith(component_type) and attributes.get("function") == function:
-                    # Find all connected junctions of the same type.
-                    group = set()
-                    q = [node_name]
-                    visited_in_group = {node_name}
-                    while q:
-                        curr = q.pop(0)
-                        group.add(curr)
-                        for neighbor in nx.all_neighbors(graph, curr):
-                            if neighbor not in visited_in_group and neighbor.startswith(component_type) and graph.nodes[neighbor].get("function") == function:
-                                visited_in_group.add(neighbor)
-                                q.append(neighbor)
-                    
+                    if merge_adjacent:
+                        # Find all connected junctions of the same function.
+                        group = set()
+                        q = [node_name]
+                        visited_in_group = {node_name}
+                        while q:
+                            curr = q.pop(0)
+                            group.add(curr)
+                            for neighbor in nx.all_neighbors(graph, curr):
+                                if neighbor not in visited_in_group and neighbor.startswith(component_type) and graph.nodes[neighbor].get("function") == function:
+                                    visited_in_group.add(neighbor)
+                                    q.append(neighbor)
+                    else:
+                        # Fallback: each junction is its own unit (no fusion, no collapse).
+                        group = {node_name}
+
                     # Replace the identified group with a single conceptual node.
                     replace_node_group(group, f"{new_name_base}_{counter}")
                     visited_nodes.update(group)
@@ -154,8 +258,15 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
         topo_sort = list(nx.topological_sort(graph))
         highest_order_node = topo_sort[-1]
 
-        # Identify all "branching" nodes (junctions, filters, droplet generators).
-        target_nodes = sorted([n for n in graph.nodes if n.startswith(('splitting', 'combining', 'droplet', 'filter'))], key=str.lower)
+        # Identify all "branching" nodes: combine/split units and DLD filters (which fan a
+        # stream into two size-sorted outputs). In v2 droplet generators and pillar-matrix
+        # filters are single-input/single-output pass-throughs, so they are NOT branchers --
+        # they are narrated as ordinary steps in the linear handler instead.
+        target_nodes = sorted(
+            [n for n in graph.nodes
+             if n.startswith(('splitting', 'combining'))
+             or (n.startswith('filter') and graph.nodes[n].get('type') == 'dld')],
+            key=str.lower)
         
         # Find the branching node that is "furthest" from the outlets to structure the description
         # around the most influential, early-stage operations.
@@ -173,8 +284,7 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
             if furthest_node.startswith("combining"): return self._combining_to_text(graph, furthest_node, detailed)
             if furthest_node.startswith("splitting"): return self._splitting_to_text(graph, furthest_node, detailed)
             if furthest_node.startswith("filter"): return self._filter_to_text(graph, furthest_node, detailed)
-            if furthest_node.startswith("droplet"): return self._droplet_to_text(graph, furthest_node, detailed)
-        
+
         # If no branching nodes are found, the graph is a simple linear sequence.
         return self._handle_linear_subgraph(graph, detailed)
 
@@ -193,8 +303,13 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
             A graph with a single node summarizing the linear process.
         """
         graph = graph.copy()
-        # Outlets are terminal nodes, so they are removed to find the next step.
-        graph.remove_nodes_from([n for n in graph.nodes if n.startswith('outlet')])
+        # Outlets are terminal nodes, so they are removed to find the next step. Capturing them
+        # first lets this chain carry an outlet marker (stripped again by
+        # _renumber_outlets_by_reading_order): the marker rides the summary node into the assembled
+        # text, so every outlet ends up tokenised in true narration order no matter which recursive
+        # branch removed it.
+        terminal_outlets = [n for n in graph.nodes if n.startswith('outlet')]
+        graph.remove_nodes_from(terminal_outlets)
         
         # Find the root of the linear sequence (a node with no inputs).
         root_nodes = [n for n, d in graph.in_degree() if d == 0]
@@ -207,8 +322,13 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
             inlet_number = int(node_name.split("_")[1])
             prefix = f"a {self._number_prefix(inlet_number-1)} " if inlet_number > 1 else "a "
             node_attributes.update({
-                "action": "", "output_type": f"{prefix}fluid", "number_nodes": 0
+                "action": "", "output_type": f"{prefix}fluid@@RO:{node_name}@@", "number_nodes": 0
             })
+
+        # Tag this chain with the outlet it terminates at. Only the first (outermost) call sees the
+        # outlet; deeper recursive calls inherit the token via succ_attrs further down.
+        if terminal_outlets:
+            node_attributes["outlet_token"] = "".join(f"@@OUTLET:{o}@@" for o in terminal_outlets)
 
         # Base case: If only one node is left, the sequence is fully described.
         if len(graph.nodes()) <= 1:
@@ -224,48 +344,104 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
         prev_action = node_attributes.get("action", "")
         prev_output_type = node_attributes.get("output_type", "")
         prev_num_nodes = node_attributes.get("number_nodes", 0)
+        # The originating special stream/droplet this chain stays attributed to (e.g. a DLD
+        # "smaller particle stream" or a split "first stream"), or None for an ordinary fluid.
+        prev_origin = node_attributes.get("stream_origin")
 
-        # Define the descriptive terms for each component type.
+        # Verb, resulting fluid, and object-attachment mode for each linear (single-output)
+        # component. The component is implied by its verb -- "mix" -> mixer, "form droplets" ->
+        # droplet generator, "filter out particles" -> pillar-matrix filter -- except the tesla
+        # valve, which has no implying verb and so is named in the clause itself. A product of
+        # None marks a flow element (the tesla valve) that does not transform the fluid, so the
+        # running output_type is carried through. Non-default params / a non-default type ride a
+        # "(using ...)" aside built by _module_detail. The mode selects the lead-clause grammar:
+        #   None    -> transitive: "Mix <fluid>"            / chain "..., then mix"
+        #   "from"  -> "Form droplets from <fluid>"          / chain "..., then form droplets"
+        #   "react" -> chamber grammar: "Let <fluid> react"  / chain "..., then let react"
+        #   "tesla" -> tesla valve, named in the clause (handled specially)
         action_details = {
-            "chamber": ("let react", "reaction product", {"length": 'μm length', "width": 'μm width'}),
-            "mixer": ("mix", "mixture", {"num_turnings": ' turnings'}),
-            "delay": ("delay", "delayed liquid", {"num_turnings": ' turnings'}),
+            "chamber":     ("let react", "reaction product", "react"),
+            "mixer":       ("mix", "mixture", None),
+            "delay":       ("delay", "delayed liquid", None),
+            "droplet":     ("form droplets", "droplets", "from"),
+            "filter":      ("filter out particles", "filtered fluid", "from"),
+            "tesla_valve": ("direct", None, "tesla"),
         }
 
         # Generate the next part of the sentence based on the successor's type.
-        for comp_type, (verb, product, attrs) in action_details.items():
-            if successor.startswith(comp_type):
-                module_details = ''
-                # Add hardware details if they are non-default or if 'detailed' mode is on.
-                if not self._check_default_values(successor, succ_attrs):
-                    details_str = " and ".join([f'{succ_attrs[k]}{v}' for k, v in attrs.items()])
-                    module_details = f' (using {comp_type}_synonym with {details_str})'
-                elif detailed and random.random() < 0.5:
-                    module_details = f' (using {comp_type}_synonym)'
+        for comp_type, (verb, product, mode) in action_details.items():
+            if not successor.startswith(comp_type):
+                continue
 
-                # Construct the action phrase, handling grammar for the start of a sentence vs. mid-sentence.
-                if counter == 0:
-                    # Special handling for "chamber" due to grammar
-                    if comp_type == "chamber":
-                        base_action = f"Let {prev_output_type} react{module_details}"
-                    # Standard handling for all other types
-                    else:
-                        base_action = f"{verb.capitalize()} {prev_output_type}{module_details}"
-                    
-                    succ_attrs["action"] = base_action if not prev_action else f"{prev_action} Then, {base_action.lower()}"
+            # Build the leading clause (sentence start) and the chained clause (mid-sentence).
+            if mode == "tesla":
+                params = self._param_phrases(successor, succ_attrs)
+                aside = f" (with {self._join_and(params)})" if params else ""
+                lead = f"Direct {prev_output_type} through a tesla_valve_synonym{aside}"
+                chain = f"direct through a tesla_valve_synonym{aside}"
+            else:
+                detail = self._module_detail(successor, succ_attrs, detailed)
+                if mode == "react":
+                    lead = f"Let {prev_output_type} react{detail}"
+                elif mode == "from":
+                    lead = f"{verb.capitalize()} from {prev_output_type}{detail}"
                 else:
-                    succ_attrs["action"] = f"{prev_action}, then {verb}{module_details}"
-                
-                # Update the description of what the fluid has become (e.g., "the mixture").
-                succ_attrs["output_type"] = f"the {product}"
-                break
-        
-        # Add more context to the output type for clarity if the input was a special stream (e.g., "the mixture of the smaller particle stream").
-        match = re.search(r"(\w+\s+particle stream.*|\w+\s+stream.*|droplets)", prev_output_type)
-        if match:
-             succ_attrs["output_type"] += f' of the {match.group(1)}'
+                    lead = f"{verb.capitalize()} {prev_output_type}{detail}"
+                chain = f"{verb}{detail}"
 
-        # Update attributes for the next recursive step.
+            # Sentence start vs. continuation of an existing clause.
+            if counter == 0:
+                succ_attrs["action"] = lead if not prev_action else f"{prev_action} Then, {lead[0].lower() + lead[1:]}"
+            else:
+                succ_attrs["action"] = f"{prev_action}, then {chain}"
+
+            # Mark this component's first mention so its JSON id can be renumbered into reading
+            # order. Inlets and (pillar/DLD) filters also carry a spoken ordinal that
+            # _canonicalize_reading_order rewrites; the pass-through components (mixer, delay,
+            # chamber, droplet, tesla_valve) have no spoken ordinal, so the marker only reorders
+            # their ids via _renumber_passthrough_by_reading_order.
+            succ_attrs["action"] += f"@@RO:{successor}@@"
+
+            # Update what the fluid has become and which originating special stream/droplet it
+            # stays attributed to ("the reaction product of the smaller particle stream"). A flow
+            # element (product None) leaves the fluid -- and its attribution -- unchanged. The
+            # attribution is composed onto the fresh product each step rather than appended to the
+            # previous label, so it never nests/explodes across a long chain.
+            if product is None:
+                succ_attrs["output_type"] = prev_output_type
+                succ_attrs["stream_origin"] = prev_origin
+            elif comp_type == "droplet":
+                # Forming droplets makes "droplets" the new origin. A droplet set carried from a split
+                # or DLD stream is already anchored to it ("the droplets of the smaller particle
+                # stream"), and never to itself ("droplets of the droplets"). Otherwise the set is a
+                # bare "the droplets" -- natural and kept when it is the ONLY droplet set in the design.
+                # With >=2 droplet generators a bare "the droplets" is ambiguous (which set?), so anchor
+                # this one to the fluid it is formed from ("the droplets of the third fluid" / "of the
+                # mixture"), mirroring the split/DLD stream disambiguation. The source ordinal rides
+                # through and is renumbered to reading order by _canonicalize_reading_order; the
+                # first-mention marker is stripped here (it is preserved in the action) so none doubles.
+                if prev_origin and not prev_origin.startswith("droplets"):
+                    origin = prev_origin
+                elif self._n_droplets >= 2 and not prev_output_type.startswith("the droplets"):
+                    origin = re.sub(r"@@[A-Z]+:[^@]+@@", "", self._definite(prev_output_type))
+                    origin = origin[len("the "):] if origin.startswith("the ") else origin
+                else:
+                    origin = None
+                succ_attrs["output_type"] = f"the droplets of the {origin}" if origin else "the droplets"
+                # Propagate the anchor into the origin tag too, but only with >=2 droplet sets, so a
+                # downstream product stays attributable ("the reaction product of the droplets of the
+                # third fluid") instead of a bare "the reaction product of the droplets" that collides
+                # with another droplet set; a lone droplet set keeps the bare, natural origin.
+                succ_attrs["stream_origin"] = (
+                    f"droplets of the {origin}" if origin and self._n_droplets >= 2 else "droplets")
+            else:
+                succ_attrs["output_type"] = f"the {product} of the {prev_origin}" if prev_origin else f"the {product}"
+                succ_attrs["stream_origin"] = prev_origin
+            break
+
+        # Update attributes for the next recursive step. The terminal-outlet marker rides forward
+        # onto the summary node so it survives to the caller (and into the assembled text).
+        succ_attrs["outlet_token"] = node_attributes.get("outlet_token")
         succ_attrs["number_nodes"] = prev_num_nodes + 1
         graph.remove_node(node_name)
         return self._handle_linear_subgraph(graph, detailed, counter + 1)
@@ -315,10 +491,9 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
 
         node_attributes = graph.nodes[furthest_node]
         
-        # Optionally add specific hardware details about the junction types used.
-        module_details = ''
-        if detailed and random.random() < 0.5:
-            module_details = f' (using {self._describe_junctions(node_attributes["junction_types"])})'
+        # Name the physical junction(s) only when that adds information the operation does not
+        # already imply -- a non-default (Y) shape or a multi-junction fan; see _junction_aside.
+        module_details = self._junction_aside(node_attributes["junction_specs"])
 
         # Initialize the attributes for the new combined node.
         node_attributes.update({
@@ -330,6 +505,8 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
         # These lists and counters will help build the final description from the different incoming branches.
         further_fluids = []
         interim_actions = []
+        interim_outputs = []  # product label of each interim branch (e.g. "the delayed liquid"), named in the merge
+        inlet_marks = []     # @@RO@@ markers for direct inlets (rendered anonymously as "other fluids").
         number_inlets = 0
         counter = 0          # Counts incoming "solutions" from other processes.
         further_counter = 0  # Counts incoming streams/droplets from other processes.
@@ -347,8 +524,13 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
 
             # Categorize the incoming branch to decide how to describe it.
             if num_nodes > 0 and not is_stream_or_droplet:
-                # This branch represents a product of a previous process (e.g., a mixture).
+                # This branch represents a product of a previous process (e.g., a mixture). Name it in
+                # the merge by its actual product label rather than an opaque "the solution", so the
+                # reader can tell which earlier-described stream it is. Strip the internal markers and
+                # make it definite (a pass-through-only branch keeps its inlet label, e.g. "a second
+                # fluid" -> "the second fluid").
                 if action: interim_actions.append(action)
+                interim_outputs.append(self._definite(re.sub(r"@@[A-Z]+:[^@]+@@", "", output_type)))
                 counter += 1
                 node_attributes["number_nodes"] += num_nodes
                 
@@ -364,8 +546,11 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
                 node_attributes["number_nodes"] += num_nodes
                 
             else:
-                # This branch is a direct fluid inlet.
+                # This branch is a direct fluid inlet, rendered anonymously as "N other fluids".
+                # Tag it so reading-order numbering still places it by where it is narrated.
                 number_inlets += 1
+                if node_name.startswith("inlet"):
+                    inlet_marks.append(f"@@RO:{node_name}@@")
 
         # --- 4. Generate the Final Descriptive Text ---
         
@@ -379,18 +564,14 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
             if counter == 0:
                 action_clause = ' Then, combine'
             else:
-                solution_text = 'the solution' if counter == 1 else f'the {counter} solutions'
-                action_clause = f' Then, combine {solution_text}'
+                action_clause = f' Then, combine {self._join_solution_labels(interim_outputs)}'
         else:
             if counter == 0:
                 inlet_text = f'{number_inlets} fluid{"s" if number_inlets > 1 else ""}'
                 action_clause = f' Then, combine {inlet_text}' if further_fluids else f'Combine {inlet_text}'
-            elif counter == 1:
-                inlet_text = f'{number_inlets} other fluid{"s" if number_inlets > 1 else ""}'
-                action_clause = f' Then, combine the solution with {inlet_text}'
             else:
                 inlet_text = f'{number_inlets} other fluid{"s" if number_inlets > 1 else ""}'
-                action_clause = f' Then, combine the {counter} solutions with {inlet_text}'
+                action_clause = f' Then, combine {self._join_solution_labels(interim_outputs)} with {inlet_text}'
 
         # Third, append details about any other incoming fluids.
         if further_fluids:
@@ -406,10 +587,15 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
             if counter == 0:
                 if number_inlets == 0:
                     action_clause = action_clause.replace("with", "", 1)
-                action_clause = action_clause.replace("fluid", "other fluid")
+                # Mark the direct inlets as "other fluids" (they are combined WITH the further fluids).
+                # Target only the inlet COUNT ("3 fluids" -> "3 other fluids"); a blanket replace also
+                # corrupts fluid LABELS among the further fluids -- "the filtered fluid of the first
+                # stream" -> "...filtered other fluid...", "the droplets of the second fluid" ->
+                # "...second other fluid".
+                action_clause = re.sub(r"(\d+) fluid", r"\1 other fluid", action_clause)
 
-        # Finalize the action clause with hardware details and a period.
-        action_clause += f"{module_details}."
+        # Finalize the action clause with hardware details, the direct-inlet markers, and a period.
+        action_clause += f"{module_details}{''.join(inlet_marks)}."
 
         ## --- 5. Finalize Node Attributes and Return for Next Recursion ---
         
@@ -437,7 +623,7 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
             A new graph containing a single node with the full process description.
         """
         graph = graph.copy()
-        module_details = f' (using {self._describe_junctions(graph.nodes[furthest_node]["junction_types"])})' if detailed and random.random() < 0.5 else ''
+        module_details = self._junction_aside(graph.nodes[furthest_node]["junction_specs"])
         outgoing_edge_data = {neighbor: data for _, neighbor, data in graph.edges(furthest_node, data=True)}
         
         # First, process the single path that leads into the splitting junction.
@@ -453,22 +639,13 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
             key=lambda c: (len(self._filter_nodes(c)), list(nx.topological_sort(graph.subgraph(self._filter_nodes(c))))[0].lower() if self._filter_nodes(c) else "")
         )
 
-        respond_graphs, next_splitting_count, stream_counter = [], 0, 0
-        # Process each downstream branch (component) separately.
+        respond_graphs, stream_counter = [], 0
+        # Process each downstream branch (component) separately. A stream carried in from an earlier
+        # split already wears that split's anchor (set when it was created below), so it needs no
+        # extra disambiguation here.
         for i, component in enumerate(weakly_connected_components):
             subgraph = graph.subgraph(component).copy()
 
-            # Add extra context if a stream from a previous splitting junction is used as an input here.
-            splitstream_nodes = [node for node in component if node.startswith("splitstream")]
-            for node in splitstream_nodes:
-                # Node name format: e.g., "splitstream_..._splitting_unit_3"
-                # The ID is the last part of the original furthest_node name.
-                splitting_junction_id = int(node.split("_")[5])
-                if " junction" not in subgraph.nodes[node]["output_type"]:
-                    context = f' of the {self._number_prefix(splitting_junction_id - 1)} splitting junction_synonym'
-                    subgraph.nodes[node]["output_type"] += context
-
-                    
             outgoing_nodes = [node for node in outgoing_edge_data if node in component]
 
             # Perform a topological sort to find the highest-order node.
@@ -482,63 +659,63 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
                 reverse=True
             )
             
-            # Insert a placeholder node (e.g., 'splitstream_0_0_...') to represent the start of this specific output branch.
-            # This node is given a descriptive name like "the first stream".
+            # Insert a placeholder node (e.g., 'splitstream_0_0_...') to represent the start of this
+            # specific output branch, named "the first stream" -- anchored to its split ("the second
+            # split's first stream") when the design has >=2 splits, otherwise left bare.
             for j, out_node in enumerate(outgoing_nodes):
                 new_node_name = f"splitstream_{i}_{j}_{furthest_node}"
-                node_attrs = {
-                    "action": "",
-                    "output_type": f"the {self._number_prefix(stream_counter)} stream",
-                    "number_nodes": 0
-                }
-                if next_splitting_count > 0:
-                    split_id = int(furthest_node.split("_")[2]) - 1
-                    node_attrs["output_type"] += f' of the {self._number_prefix(split_id)} splitting junction_synonym'
-                
-                subgraph.add_node(new_node_name, **node_attrs)
+                stream_label = f"the {self._split_possessive(furthest_node)}{self._number_prefix(stream_counter)} stream"
+                subgraph.add_node(new_node_name, action="", output_type=stream_label,
+                                  number_nodes=0, stream_origin=stream_label[len("the "):])
                 subgraph.add_edge(new_node_name, out_node, **outgoing_edge_data[out_node])
                 stream_counter += 1
-            
-            next_splitting_count += sum(1 for node in component if node.startswith("splitting"))
+
             # Recursively call the main function to generate the text for this entire branch.
             respond_graphs.append(self._graph_to_text(subgraph, detailed))
         
         # Retrieve the description of the fluid/process that is being split.
         incoming_props = list(incoming_subgraph.nodes(data=True))[0][1]
         
-        # Start building the final combined action description.
+        # Start building the final combined action description. "@@SPLITDEF@@" records where this
+        # split is introduced so _resolve_split_anchors can number the splits in the order they
+        # appear; it is stripped from the final text.
+        splitdef = f"@@SPLITDEF:{int(furthest_node.split('_')[2])}@@" if self._n_splits >= 2 else ""
         action_parts = []
         if incoming_props.get("number_nodes", 0) == 0:
-             action_parts.append(f"Split {incoming_props['output_type']} into {len(outgoing_edge_data)} streams{module_details}.")
+             action_parts.append(f"Split {incoming_props['output_type']} into {len(outgoing_edge_data)} streams{module_details}{splitdef}.")
         else:
-            action_parts.append(f"{incoming_props['action']} Then, split {incoming_props['output_type']} into {len(outgoing_edge_data)} streams{module_details}.")
+            action_parts.append(f"{incoming_props['action']} Then, split {self._definite(incoming_props['output_type'])} into {len(outgoing_edge_data)} streams{module_details}{splitdef}.")
 
         number_nodes = incoming_props.get("number_nodes", 0) + 1
 
         # Collect the results from all the processed downstream branches.
         outlets = []
+        outlet_tokens = []
         res_action_parts = []
         for res_graph in respond_graphs:
             res_node = list(res_graph.nodes)[0]
             res_props = res_graph.nodes[res_node]
+            token = res_props.get("outlet_token") or ""
             if res_node.startswith("splitstream"):
                 # If a stream just goes to an outlet, describe it simply.
-                outlets.append(f'Route {res_props["output_type"]} to outlet_synonym.')
+                outlets.append(f'Route {res_props["output_type"]} to outlet_synonym{token}.')
+                outlet_tokens.append(token)
             else:
                 # Otherwise, append the full description of that branch's process.
-                res_action_parts.append(res_props["action"])
+                res_action_parts.append(res_props["action"] + token)
 
             number_nodes += res_props["number_nodes"]
-        
+
         # Assemble the final, complete action string.
         final_action = " ".join(action_parts)
 
-        # Add a summary of outlet routing if multiple streams go to outlets.
+        # Add a summary of outlet routing if multiple streams go to outlets. The per-outlet markers
+        # are appended even when the prose collapses to a count, so no outlet drops out of the text.
         if len(outlets) > 1:
-            final_action += f' Route {len(outlets)} streams to separate outlet_synonyms. '
+            final_action += f' Route {len(outlets)} streams to separate outlet_synonyms.{"".join(outlet_tokens)} '
         elif len(outlets) == 1:
             final_action += f' {outlets[0]} '
-        else: 
+        else:
             final_action += ' '
 
         final_action += " ".join(res_action_parts)
@@ -564,12 +741,9 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
         """
         graph = graph.copy()
         filter_attrs = graph.nodes[furthest_node]
-        module_details = ''
-        # Add specific parameter details if non-default.
-        if not self._check_default_values(furthest_node, filter_attrs):
-            module_details = f' (using filter_synonym with {filter_attrs["critical_particle_diameter"]}μm critical particle diameter)'
-        elif detailed and random.random() < 0.5:
-            module_details = f' (using filter_synonym)'
+        # DLD-only handler (pillar-matrix filters are single-output and narrated linearly). The
+        # aside surfaces the DLD type qualifier and any non-default geometry/critical-diameter.
+        module_details = self._module_detail(furthest_node, filter_attrs, detailed)
 
         outgoing_edge_data = {neighbor: data for _, neighbor, data in graph.edges(furthest_node, data=True)}
         
@@ -579,7 +753,6 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
         graph.remove_nodes_from(predecessors + [furthest_node])
         
         respond_graphs = []
-        next_filter_count = 0
 
         # Sort downstream components for deterministic processing.
         weakly_connected_components = sorted(
@@ -590,16 +763,8 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
         for i, component in enumerate(weakly_connected_components):
             subgraph = graph.subgraph(component).copy()
 
-            # Add context if a particle stream from a previous filter is used here.
-            separatedstream_nodes = [node for node in component if node.startswith("separatedstream")]
-            for node in separatedstream_nodes:
-                # Node name format: e.g., "separatedstream_..._filter_3"
-                # The ID is the last part of the original furthest_node name.
-                filter_id = int(node.split("_")[4])
-                if not re.search(r"of the \w+ filter", subgraph.nodes[node]["output_type"]):
-                    context = f' of the {self._number_prefix(filter_id - 1)} filter_synonym'
-                    subgraph.nodes[node]["output_type"] += context
-
+            # A particle stream carried in from an earlier filter already wears that filter's anchor
+            # (set when it was created below), so it needs no extra disambiguation here.
             outgoing_nodes = [node for node in outgoing_edge_data if node in component]
 
             # Perform a topological sort to find the highest-order node.
@@ -613,21 +778,18 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
                 reverse=True
             )
             
-            # Insert placeholder nodes for the "smaller" and "larger" particle streams.
+            # Insert placeholder nodes for the "smaller" and "larger" particle streams -- anchored to
+            # their filter ("the second filter's larger particle stream") when the design has >=2 DLD
+            # filters, otherwise left bare. The filter ordinal is the JSON filter id; like any other
+            # "the Nth filter" reference it is renumbered into reading order by _canonicalize_reading_order.
             for j, out_node in enumerate(outgoing_nodes):
                 particle_type = outgoing_edge_data[out_node]["filter_connection_type"]
                 new_node_name = f"separatedstream_{i}_{j}_{furthest_node}"
-
-                filter_info = ""
-                if next_filter_count > 0:
-                    filter_id = int(furthest_node.split("_")[1]) - 1
-                    filter_info = f' of the {self._number_prefix(filter_id)} filter_synonym'
-                
-                subgraph.add_node(new_node_name, action="", output_type=f"the {particle_type} particle stream{filter_info}", number_nodes=0)
+                stream_label = self._particle_stream_label(furthest_node, particle_type)
+                subgraph.add_node(new_node_name, action="", output_type=stream_label,
+                                  number_nodes=0, stream_origin=stream_label[len("the "):])
                 subgraph.add_edge(new_node_name, out_node, **outgoing_edge_data[out_node])
 
-            next_filter_count += sum(1 for node in component if node.startswith("filter"))
-                
             # Recursively generate text for each downstream branch.
             respond_graphs.append(self._graph_to_text(subgraph, detailed))
         
@@ -636,15 +798,15 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
         # Assemble the final description.
         action_parts = []
         if incoming_props.get("number_nodes", 0) == 0:
-            action_parts.append(f"Separate smaller and larger particles of {incoming_props['output_type']}{module_details}.")
+            action_parts.append(f"Separate smaller and larger particles of {incoming_props['output_type']}{module_details}@@RO:{furthest_node}@@.")
         else:
-            action_parts.append(f"{incoming_props['action']} Separate smaller and larger particles of {incoming_props['output_type']}{module_details}.")
+            action_parts.append(f"{incoming_props['action']} Separate smaller and larger particles of {self._definite(incoming_props['output_type'])}{module_details}@@RO:{furthest_node}@@.")
         
         number_nodes = incoming_props.get("number_nodes", 0) + 1
 
         for res_graph in respond_graphs:
             res_props = list(res_graph.nodes(data=True))[0][1]
-            action_parts.append(res_props["action"])
+            action_parts.append(res_props["action"] + (res_props.get("outlet_token") or ""))
             number_nodes += res_props["number_nodes"]
         
         # Return a new single-node graph representing the fully described filtering process.
@@ -652,120 +814,374 @@ class ProcessOrientedPromptGenerator(PromptGenerator):
         combined_graph.add_node("combined_node", action=" ".join(action_parts), output_type="solution", number_nodes=number_nodes)
         return combined_graph
 
-    def _droplet_to_text(self, graph: nx.DiGraph, furthest_node: str, detailed: bool) -> nx.DiGraph:
+    def _junction_aside(self, specs: List[Tuple[int, str]]) -> str:
+        """A "(using ...)" hardware aside naming the physical junction(s) behind a combine/split
+        operation, or "" to leave them unstated.
+
+        The operation clause already conveys the function (combine/split) and the width (via the
+        fluid/stream count), so a lone junction of the default T shape adds nothing and is left
+        unnamed. An aside is emitted only when it carries non-implied structure:
+          * a non-default (Y) shape -- otherwise the JSON `type` could not be recovered; or
+          * a fan built from several chained junctions -- e.g. a 4-way split realized as
+            "a binary T-junction and a 3-way fork", a decomposition the bare "split into 4
+            streams" would hide.
+        Thus the aside is present iff the junctions are anything other than a single T-junction.
         """
-        Handles a droplet generator by processing its continuous and dispersed
-        phase inputs and composing a description of the droplet formation process.
-        Like combining, this involves two distinct input paths.
-        
+        informative = len(specs) > 1 or any(shape != self.DEFAULT_JUNCTION_SHAPE for _, shape in specs)
+        return f" (using {self._describe_junctions(specs)})" if informative else ""
+
+    def _describe_junctions(self, specs: List[Tuple[int, str]]) -> str:
+        """Summarizes the physical junctions absorbed by a combine/split unit as a hardware
+        aside, e.g. "a 3-way fork and 2 binary T-junctions". Width and T/Y shape come from the
+        base ``_describe_junction`` helper; identical descriptions are collapsed with a count.
+
         Args:
-            graph: The current microfluidic chip graph.
-            furthest_node: The ID of the droplet generator being processed.
-            detailed: Flag to include more hardware details.
-        
-        Returns:
-            The result of the next recursive call to _graph_to_text.
+            specs: ``(width, shape)`` pairs, one per absorbed junction (from ``junction_specs``).
         """
-        graph = graph.copy()
-        continuous_subgraph, dispersed_subgraph = None, None
-        nodes_to_remove = set()
-
-        # 1. Isolate and process the incoming continuous and dispersed fluid paths separately.
-        for source, _, attrs in graph.in_edges(furthest_node, data=True):
-            predecessors = [source] + list(nx.ancestors(graph, source))
-            nodes_to_remove.update(predecessors)
-            sub = graph.subgraph(predecessors).copy()
-            if attrs.get("droplet_connection_type") == "continuous":
-                continuous_subgraph = self._handle_linear_subgraph(sub, detailed)
-            elif attrs.get("droplet_connection_type") == "dispersed":
-                dispersed_subgraph = self._handle_linear_subgraph(sub, detailed)
-        
-        graph.remove_nodes_from(nodes_to_remove)
-        
-        # 2. Extract the properties from the processed paths.
-        cont_name, cont_props = list(continuous_subgraph.nodes(data=True))[0]
-        disp_name, disp_props = list(dispersed_subgraph.nodes(data=True))[0]
-
-        node_attrs = graph.nodes[furthest_node]
-
-        # 3. Build the action, starting with the dispersed phase (the fluid being turned into droplets).
-        action = ""
-        number_nodes = 1 + disp_props.get("number_nodes", 0)
-
-        if disp_props.get("number_nodes", 0) > 0:
-            # Case: The dispersed phase has its own prior processing steps.
-            disp_action = disp_props.get("action", "")
-            if "stream" not in disp_name:
-                action = f"{disp_action} Then, form droplets from this"
+        descs = [self._describe_junction(width, shape) for width, shape in specs]
+        parts, seen = [], []
+        for desc in descs:
+            if desc in seen:
+                continue
+            seen.append(desc)
+            count = descs.count(desc)
+            if count == 1:
+                parts.append(desc)
             else:
-                action = f"{disp_action} Then, form droplets from {disp_props.get('output_type')}"
-        else:
-            # Case: The dispersed phase is a simple input.
-            action = f"Form droplets from {disp_props.get('output_type')}"
+                # "a binary Y-junction" -> "2 binary Y-junctions"
+                noun = desc.split(" ", 1)[1] if desc.startswith(("a ", "an ")) else desc
+                parts.append(f"{count} {noun}s")
+        return self._join_and(parts)
 
-        # 4. Incorporate the continuous phase into the description.
-        number_nodes += cont_props.get("number_nodes", 0)
-        cont_nodes_count = cont_props.get("number_nodes", 0)
+    @staticmethod
+    def _join_and(items: List[str]) -> str:
+        """Joins items into an English list: ``[a, b, c]`` -> ``"a, b and c"``."""
+        items = list(items)
+        if len(items) <= 1:
+            return items[0] if items else ""
+        if len(items) == 2:
+            return f"{items[0]} and {items[1]}"
+        return ", ".join(items[:-1]) + f" and {items[-1]}"
 
-        if cont_nodes_count > 0:
-            # Case: The continuous phase also has its own processing steps.
-            # This logic decides how the two process descriptions are woven together grammatically.
-            is_special_case = (
-                not ("stream" in cont_name or "done" in cont_name)
-                and cont_nodes_count <= disp_props.get("number_nodes", 0)
-            )
+    def _join_solution_labels(self, labels: List[str]) -> str:
+        """Join the interim-product labels of a merge (e.g. "the delayed liquid", "the mixture").
 
-            if is_special_case:
-                # Special Case: Continuous phase process is simpler and described as a secondary step.
-                add_info = ' for the former droplet formation' if "droplet" in cont_props.get("action", "") else ''
-                cont_action_text = cont_props.get("action", "a.")
-                action += f'. For creating the continuous phase, {cont_action_text[0].lower() + cont_action_text[1:-1]} and use this as continuous phase{add_info}.'
+        Identical labels are collapsed with a count ("the mixture" twice -> "2 mixtures") so a merge
+        never reads "the mixture and the mixture"; labels carrying a distinguishing origin (e.g. "the
+        reaction product of the first stream") are unique and listed as-is.
+        """
+        parts, seen = [], []
+        for label in labels:
+            if label in seen:
+                continue
+            seen.append(label)
+            count = labels.count(label)
+            if count == 1:
+                parts.append(label)
             else:
-                # Normal Case: Continuous phase is the primary process.
-                add_info = ''
-                if "done_drop" in cont_name:
-                    drop_index = int(cont_name.split("_")[3]) - 1
-                    add_info = f' of the {self._number_prefix(drop_index)} droplet formation'
+                noun = label[len("the "):] if label.startswith("the ") else label
+                parts.append(f"{count} {noun}s")
+        return self._join_and(parts)
 
-                action = f"{cont_props.get('action', '')} In the meantime, {action} (using {cont_props.get('output_type')}{add_info} as continuous phase)."
+    @staticmethod
+    def _definite(output_type: str) -> str:
+        """Render a fluid label definite for RE-mention as a later operation's object.
 
-        elif "stream" in cont_props.get("output_type", ""):
-            # Case: Continuous phase is a simple stream from a previous split/filter.
-            action += f" (using {cont_props.get('output_type')} as continuous phase)."
-        else:
-            # Case: Continuous phase is a simple input (e.g., from an inlet) -> (dont mention specific continuous at all)
-            action += "."
-        
-        # 5. Finalize the node and continue the recursive graph-to-text conversion.
-        node_attrs.update({
-            "action": action,
-            "output_type": "the droplets",
-            "number_nodes": number_nodes
-        })
-        
-        # Relabel the node to ensure it's processed correctly in the recursion.
-        graph = nx.relabel_nodes(graph, {furthest_node: f'aaad-done_drop_{furthest_node}'})
-        return self._graph_to_text(graph, detailed)
-    
-    def _check_default_values(self, node_name: str, node_attributes: Dict) -> bool:
-        """Checks if a component's attributes match the predefined defaults to decide if they need to be mentioned in the prompt."""
-        defaults_map = {'mixer': {'num_turnings': self.DEFAULT_ATTRIBUTES['num_turnings']},'delay': {'num_turnings': self.DEFAULT_ATTRIBUTES['num_turnings']}, 'chamber': {'length': self.DEFAULT_ATTRIBUTES['length'], 'width': self.DEFAULT_ATTRIBUTES['width']}, 'filter': {'critical_particle_diameter': self.DEFAULT_ATTRIBUTES['critical_particle_diameter']}}
-        for comp_type, defaults in defaults_map.items():
-            if node_name.startswith(comp_type):
-                return all(node_attributes.get(attr) == val for attr, val in defaults.items())
-        return True
+        The carried-through inlet fluid is introduced indefinitely ("a fluid", "a second
+        fluid"), and a pure flow element (a tesla valve, ``product=None``) leaves that label
+        unchanged. When a branch handler then re-mentions it -- "Direct a fluid through a
+        tesla valve. Then split <X> into 2 streams." -- a bare "a fluid" reads as a fresh,
+        unrelated fluid and hides that the split acts on the SAME stream. Turning it definite
+        ("the fluid" / "the second fluid") makes the back-reference explicit while preserving
+        any ordinal disambiguator. Labels that are already definite ("the mixture", "the
+        smaller particle stream", "the droplets") are returned unchanged.
+        """
+        return f"the {output_type[2:]}" if output_type.startswith("a ") else output_type
 
-    def _describe_junctions(self, junction_list: List[str]) -> str:
-        """Creates a natural language summary of a list of junction types (e.g., "2 T-junctions and 1 Y-junction")."""
-        grouped = [f"{len(group)} {k}_synonym{'s' if len(group) > 1 else ''}" for k, g in groupby(junction_list) if (group := list(g))]
-        if len(grouped) > 1:
-            return ", ".join(grouped[:-1]) + " and " + grouped[-1]
-        return grouped[0] if grouped else ""
+    def _type_qualifier(self, category: str, ctype: Optional[str]) -> str:
+        """Picks a prose qualifier for a component's subtype, or "" to leave it unstated.
+
+        Non-default subtypes (ring mixer, flow-focusing droplet) are always stated -- the JSON
+        ``type`` could not otherwise be recovered from the verb. Default subtypes (serpentine
+        mixer, t-junction droplet) are usually left implicit. Filter type is optional because
+        the verb already distinguishes DLD ("separate smaller and larger") from pillar-matrix
+        ("filter out particles").
+        """
+        qualifiers = self.TYPE_QUALIFIERS.get((category, ctype))
+        if not qualifiers:
+            return ""
+        if category in self.DEFAULT_TYPE:
+            if ctype == self.DEFAULT_TYPE[category] and random.random() >= 0.18:
+                return ""
+        elif random.random() >= 0.5:  # filter: type optional (conveyed by the verb)
+            return ""
+        return random.choice(qualifiers)
+
+    def _param_phrases(self, node: str, data: Dict) -> List[str]:
+        """Natural-language phrasings of a component's NON-default parameters (e.g.
+        "8 turnings", "5000 µm amplitude"). Defaults are suppressed so only deliberately
+        randomized values surface, matching the structural styles. Order follows PARAM_PHRASING.
+        """
+        category = self._node_type(node)
+        defaults = self.DEFAULT_ATTRIBUTES.get((category, data.get("type")),
+                                               self.DEFAULT_ATTRIBUTES.get((category, None), {}))
+        return [self.PARAM_PHRASING[k].format(v=data[k], s="" if data[k] == 1 else "s")
+                for k in self.PARAM_PHRASING
+                if k in data and k in defaults and data[k] != defaults[k]]
+
+    def _module_detail(self, node: str, data: Dict, detailed: bool) -> str:
+        """Optional "(using a <typed component> with <params>)" aside for a linear/DLD component.
+
+        Emitted when the component carries a stated type qualifier (e.g. a ring mixer, whose
+        type must be conveyed) or non-default parameters, and occasionally in detailed mode.
+        The component noun rides a "<category>_synonym" token so every mention of a category
+        resolves to one synonym per prompt; the type qualifier (when stated) is composed in
+        front (e.g. "ring mixer_synonym"). Returns "" when there is nothing to add.
+        """
+        category = self._node_type(node)
+        qualifier = self._type_qualifier(category, data.get("type"))
+        params = self._param_phrases(node, data)
+        noun = f"{qualifier} {category}_synonym".strip()
+        if params:
+            return f" (using {noun} with {self._join_and(params)})"
+        if qualifier or (detailed and random.random() < 0.5):
+            return f" (using {noun})"
+        return ""
 
     def _number_prefix(self, n: int) -> str:
-        """Converts an integer into an ordinal word (e.g., 2 -> "second") for more natural language."""
-        num_map = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"]
-        return num_map[n] if n < len(num_map) else f"{n+1}th"
+        """Converts a 0-based integer into an ordinal word (e.g., 1 -> "second") for natural language."""
+        return self.ORDINAL_WORDS[n] if n < len(self.ORDINAL_WORDS) else f"{n+1}th"
+
+    def _ordinal_index(self, word: Optional[str]) -> int:
+        """Inverse of _number_prefix: an ordinal word (or None, meaning "first") -> its 0-based index."""
+        if not word:
+            return 0
+        return self.ORDINAL_WORDS.index(word) if word in self.ORDINAL_WORDS else int(word[:-2]) - 1
+
+    # Prose-ordinal patterns used to REWRITE the spoken ordinal once nodes are renumbered (the
+    # narration ORDER itself comes from @@RO@@ first-mention markers, see _canonicalize_reading_order).
+    # `ord` captures the ordinal word, or None for an implicit "first". "fluid" is never synonymized;
+    # a DLD filter is referenced by ordinal only in the possessive "the Nth filter's <...> particle
+    # stream", whose literal "filter's" marks it as a filter ref (never the "filter_synonym" noun).
+    # The inlet pattern also captures the article (`art`): a fluid is introduced indefinitely
+    # ("a fluid") but RE-mentioned definitely ("the fluid", see _definite), and both forms must
+    # still be renumbered to reading order -- so the article is matched and preserved, not assumed.
+    _READING_ORDER_PATTERNS = {
+        "inlet": r"\b(?P<art>a|the) (?:(?P<ord>{ords}) )?fluid\b",
+        "filter": r"\bthe (?P<ord>{ords}) filter's\b",
+    }
+
+    def _canonicalize_reading_order(self, graph: nx.DiGraph, action_description: str) -> str:
+        """Relabel inlet and filter node IDs so they ascend in the order the narration first mentions
+        them, and rewrite any spoken ordinals in ``action_description`` to agree.
+
+        Order comes from "@@RO:<id>@@" first-mention markers the narration emits for every inlet and
+        filter -- including ones that carry NO ordinal in the prose (a pillar filter narrated only as
+        "strain out particles", or an inlet folded into a merge as "1 other fluid"). Reading prose
+        ordinals alone would miss those and dump them at the end of the numbering, so e.g. a pillar
+        filter narrated first could end up ``filter_3``. With markers each node is numbered by where
+        it is actually narrated, and the spoken ordinals ("a second fluid", "the second filter's")
+        are rewritten to match -- so the prose reads in sequence *and* every reference points at
+        exactly ``inlet_N``/``filter_N`` in the JSON built from this graph. Each style converts its
+        own graphs, so only this style's designs are affected.
+
+        ``graph`` is mutated in place because its node IDs *are* the target JSON's IDs -- the caller
+        must convert it to JSON only after generating the prompt.
+        """
+        ords = "|".join(self.ORDINAL_WORDS) + r"|\d+th"
+        relabel = {}
+        for prefix, template in self._READING_ORDER_PATTERNS.items():
+            # Narration order from the first-mention markers (captures un-ordinalled mentions too).
+            ordered = []
+            for found in re.findall(rf"@@RO:{prefix}_(\d+)@@", action_description):
+                num = int(found)
+                if num not in ordered:
+                    ordered.append(num)
+
+            present = sorted(int(n.split("_")[1]) for n in graph.nodes if n.split("_")[0] == prefix)
+            if not present:
+                continue
+            # Narrated nodes first (in reading order), then any a marker never reached (defensive).
+            ordered = ordered + [i for i in present if i not in ordered]
+            old_to_new = {old: new for new, old in enumerate(ordered, start=1)}
+            relabel.update({f"{prefix}_{old}": f"{prefix}_{new}" for old, new in old_to_new.items()})
+
+            # Rewrite the ordinal where the node IS named in prose; un-named mentions (merge inlets,
+            # pillar filters) just follow their relabeled node id.
+            pattern = re.compile(template.format(ords=ords))
+
+            def _renumber(match, old_to_new=old_to_new, prefix=prefix):
+                new = old_to_new[self._ordinal_index(match.group("ord")) + 1]
+                # inlet_1 carries no ordinal ("a/the fluid"); filter ordinals are always spelled out.
+                word = "" if prefix == "inlet" and new == 1 else self._number_prefix(new - 1) + " "
+                # Preserve the inlet's article so a definite re-mention stays "the ... fluid".
+                return f"{match.group('art')} {word}fluid" if prefix == "inlet" else f"the {word}filter's"
+
+            action_description = pattern.sub(_renumber, action_description)
+
+        action_description = re.sub(r"@@RO:(?:inlet|filter)_\d+@@", "", action_description)
+        if relabel:
+            # Two-phase via temporary names so an in-place permutation never collides (swapping
+            # inlet_1 <-> inlet_2 directly with copy=False would clobber one of them).
+            stash = {old: f"__reorder__{i}" for i, old in enumerate(relabel)}
+            nx.relabel_nodes(graph, stash, copy=False)
+            nx.relabel_nodes(graph, {stash[old]: new for old, new in relabel.items()}, copy=False)
+        return action_description
+
+    def _renumber_outlets_by_reading_order(self, graph: nx.DiGraph, action_description: str) -> str:
+        """Renumber outlet node IDs so they ascend in the order the narration routes flow to them,
+        then strip the internal ``@@OUTLET:..@@`` markers from the text.
+
+        Outlets are never named by ordinal in the prose (always "an outlet"/"the output"), but each
+        dataset example is a (prompt, JSON) pair, so the *order* outlets receive flow should still be
+        canonical: the first outlet the process feeds is ``outlet_1``, the next ``outlet_2``, and so
+        on. ``_handle_linear_subgraph`` tags every terminal chain with an ``@@OUTLET:<id>@@`` marker
+        that rides the summary node into the assembled text, so reading the markers left-to-right
+        recovers the true narration order even across nested branches.
+
+        ``graph`` is mutated in place because its node IDs *are* the target JSON's IDs -- the caller
+        converts it to JSON only after generating the prompt, so the relabel reaches the JSON.
+        Idempotent: once the IDs are already in reading order the derived map is the identity.
+        """
+        order = []
+        for found in re.findall(r"@@OUTLET:outlet_(\d+)@@", action_description):
+            num = int(found)
+            if num not in order:
+                order.append(num)
+        present = sorted(int(n.split("_")[1]) for n in graph.nodes if n.split("_")[0] == "outlet")
+        # Narrated outlets first (in reading order), then any an @@OUTLET@@ marker never reached
+        # (defensive -- every outlet should be tagged), keeping their existing order.
+        ordered = order + [i for i in present if i not in order]
+        relabel = {f"outlet_{old}": f"outlet_{new}"
+                   for new, old in enumerate(ordered, start=1) if old != new}
+        if relabel:
+            # Two-phase via temporary names so the in-place permutation never clobbers a node
+            # (renumbering outlet_1 <-> outlet_2 directly with copy=False would lose one).
+            stash = {old: f"__outlet_reorder__{i}" for i, old in enumerate(relabel)}
+            nx.relabel_nodes(graph, stash, copy=False)
+            nx.relabel_nodes(graph, {stash[old]: new for old, new in relabel.items()}, copy=False)
+        return re.sub(r"@@OUTLET:outlet_\d+@@", "", action_description)
+
+    def _assign_reading_index(self, graph: nx.DiGraph, action_description: str) -> None:
+        """Tag every node with a ``reading_index`` = the position at which the narration first
+        mentions it, so the JSON converter can emit ``connections`` in the order the prompt reads.
+
+        The order comes from the same ``@@RO:<id>@@`` / ``@@OUTLET:<id>@@`` first-mention markers
+        the renumber passes consume; this must therefore run before those passes strip them. Nodes
+        a marker never reached (defensive; e.g. junction nodes, which connections dissolve away) are
+        appended after the narrated ones. The attribute is preserved across the later id relabels
+        (``relabel_nodes`` keeps node data), and the converter never serialises it into the JSON.
+        """
+        order = []
+        for found in re.findall(r"@@(?:RO|OUTLET):([a-z_]+_\d+)@@", action_description):
+            if found not in order:
+                order.append(found)
+        idx = {node: i for i, node in enumerate(order)}
+        nxt = len(order)
+        for node in graph.nodes:
+            if node in idx:
+                graph.nodes[node]["reading_index"] = idx[node]
+            else:
+                graph.nodes[node]["reading_index"] = nxt
+                nxt += 1
+
+    # Pass-through components carry no spoken ordinal in the prose (they are referred to by a
+    # synonym, e.g. "a tesla valve"), so only their JSON ids are reordered -- no text rewriting.
+    _PASSTHROUGH_PREFIXES = ("mixer", "delay", "chamber", "droplet", "tesla_valve")
+
+    def _renumber_passthrough_by_reading_order(self, graph: nx.DiGraph, action_description: str) -> str:
+        """Renumber mixer/delay/chamber/droplet/tesla_valve IDs to the order the narration first
+        mentions them, then strip the consumed ``@@RO@@`` markers for those types.
+
+        These components are never named by ordinal in the prose, so -- like outlets -- only the
+        node ids are reordered (no spoken ordinal to rewrite). Each dataset example is a
+        (prompt, JSON) pair, so a component narrated second should be ``<prefix>_2`` in the paired
+        JSON, not an arbitrary index left over from graph construction. Order comes from the
+        ``@@RO:<id>@@`` first-mention markers every narrated component now emits, read left to
+        right across the assembled (possibly nested-branch) text.
+
+        ``graph`` is mutated in place because its node IDs *are* the target JSON's IDs -- the caller
+        converts it to JSON only after generating the prompt. Idempotent once ids are in order.
+        """
+        relabel = {}
+        for prefix in self._PASSTHROUGH_PREFIXES:
+            ordered = []
+            for found in re.findall(rf"@@RO:{prefix}_(\d+)@@", action_description):
+                num = int(found)
+                if num not in ordered:
+                    ordered.append(num)
+            present = sorted(int(n.split("_")[-1]) for n in graph.nodes if n.startswith(f"{prefix}_"))
+            if not present:
+                continue
+            # Narrated nodes first (in reading order), then any a marker never reached (defensive).
+            ordered = ordered + [i for i in present if i not in ordered]
+            relabel.update({f"{prefix}_{old}": f"{prefix}_{new}"
+                            for new, old in enumerate(ordered, start=1) if old != new})
+
+        action_description = re.sub(r"@@RO:(?:mixer|delay|chamber|droplet|tesla_valve)_\d+@@", "", action_description)
+        if relabel:
+            # Two-phase via temporary names so the in-place permutation never clobbers a node.
+            stash = {old: f"__pt_reorder__{i}" for i, old in enumerate(relabel)}
+            nx.relabel_nodes(graph, stash, copy=False)
+            nx.relabel_nodes(graph, {stash[old]: new for old, new in relabel.items()}, copy=False)
+        return action_description
+
+    def _split_possessive(self, split_unit_node: str) -> str:
+        """Possessive anchor for a stream's split, e.g. ``@@SPLITPOSS:3@@ `` -> "the second split's ".
+
+        Returns "" when the design has <2 splits (a bare "the first stream" is then unambiguous).
+        The split id rides a marker that _resolve_split_anchors rewrites to the split's reading-order
+        ordinal, so the anchor reads in the order the splits are introduced.
+        """
+        if self._n_splits < 2:
+            return ""
+        return f"@@SPLITPOSS:{int(split_unit_node.split('_')[2])}@@ "
+
+    def _particle_stream_label(self, filter_node: str, particle_type: str) -> str:
+        """Name a DLD output stream, e.g. "the smaller particle stream" -- anchored to its filter
+        ("the second filter's smaller particle stream") when the design has >=2 DLD filters.
+
+        The filter ordinal is the JSON ``filter_N`` id; _canonicalize_reading_order later renumbers
+        both it and the matching node into reading order (its pattern matches "the Nth filter's").
+        """
+        base = f"{particle_type} particle stream"
+        if self._n_dld < 2:
+            return f"the {base}"
+        return f"the {self._number_prefix(int(filter_node.split('_')[1]) - 1)} filter's {base}"
+
+    def _resolve_split_anchors(self, text: str) -> str:
+        """Resolve the split-anchor markers, numbering splits in the order they are introduced.
+
+        ``@@SPLITDEF:<id>@@`` marks where each split's "split ... into N streams" clause appears, so
+        the left-to-right order of those markers is the splits' narration order. Each
+        ``@@SPLITPOSS:<id>@@`` anchoring a stream then becomes "<that order> split's" (a possessive),
+        making every stream reference self-contained. Both markers are stripped. Runs after the
+        synonym passes so the literal noun "split" is never mangled by the action-verb synonymiser.
+        """
+        order = []
+        for found in re.findall(r"@@SPLITDEF:(\d+)@@", text):
+            uid = int(found)
+            if uid not in order:
+                order.append(uid)
+        index = {uid: i for i, uid in enumerate(order, start=1)}
+        text = re.sub(r"@@SPLITPOSS:(\d+)@@",
+                      lambda m: f"{self._number_prefix(index.get(int(m.group(1)), 1) - 1)} split's", text)
+        return re.sub(r"@@SPLITDEF:\d+@@", "", text)
+
+    def _dedupe_filter_phrasing(self, text: str) -> str:
+        """Drop a filter type-qualifier word that the randomly chosen filter synonym then echoes.
+
+        The qualifier (``particle-separation``, ``microstructured``, ...) and the noun synonym
+        (``separation filter``, ``particle filter``, ``microfilter``, ...) are picked independently
+        and concatenated, so a pairing can read "particle-separation separation filter" or
+        "particle-separation particle filter". The verb already marks the filter type, so the
+        echo is pure redundancy -- collapse it to a single mention ("particle-separation filter").
+        """
+        # Hyphenated qualifier whose first or second word is repeated as the noun's modifier.
+        text = re.sub(r'\b(\w+)-(\w+) (?:\1|\2) filter\b', r'\1-\2 filter', text)
+        # "micro" stutter from the lone single-word qualifier that overlaps "microfilter".
+        text = text.replace('microstructured microfilter', 'microstructured filter')
+        return text
 
     def _filter_nodes(self, component_nodes: List[str], ignore_patterns: Tuple[str, ...] = ('splitstream', 'separatedstream')) -> List[str]:
         """Filters out temporary placeholder nodes (like 'splitstream') from a list of node names."""

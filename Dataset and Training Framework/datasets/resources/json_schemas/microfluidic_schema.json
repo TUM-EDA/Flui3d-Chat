@@ -1,149 +1,222 @@
 {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "Microfluidic Chip",
-    "description": "A microfluidic chip design as JSON",
+    "title": "Microfluidic Chip (v2)",
+    "description": "A microfluidic chip design as JSON. v2 schema: categorized components with a `type` field, variable-width junctions, six component_params buckets, droplet generators with a single input port.",
     "type": "object",
     "additionalProperties": false,
+    "required": [
+        "connections",
+        "junctions",
+        "component_params"
+    ],
     "properties": {
         "connections": {
-            "description": "Array of connections between components",
+            "description": "Array of conceptual fluid-path connections between non-junction components.",
             "type": "array",
             "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "properties": {
-                    "source": {
-                        "type": "string",
-                        "pattern": "^((inlet|mixer|delay|chamber|droplet)_[0-9]+|filter_[0-9]+_(smaller|larger))$",
-                        "description": "ID of the source component"
-                    },
-                    "target": {
-                        "type": "string",
-                        "pattern": "^((outlet|mixer|delay|chamber|filter)_[0-9]+|droplet_[0-9]+_(continuous|dispersed))$",
-                        "description": "ID of the target component"
-                    }
-                },
                 "required": [
                     "source",
                     "target"
-                ]
+                ],
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "pattern": "^((inlet|mixer|delay|chamber|droplet|tesla_valve|filter)_[0-9]+|filter_[0-9]+_(smaller|larger))$",
+                        "description": "Source component port. `filter_N` for pillar_matrix filters; `filter_N_smaller`/`filter_N_larger` for DLD filters."
+                    },
+                    "target": {
+                        "type": "string",
+                        "pattern": "^(outlet|mixer|delay|chamber|filter|droplet|tesla_valve)_[0-9]+$",
+                        "description": "Target component port."
+                    }
+                }
             }
         },
         "junctions": {
-            "description": "Array of junctions for splitting or combining fluid flows",
+            "description": "Array of junctions implementing flows that require splitting or combining. A junction is either a split (1 source, >=2 targets) or a merge (>=2 sources, 1 target). Total port count (sources + targets) is in [3, 6]. Y-junctions are binary only (exactly 3 ports); any wider junction must be a T-junction.",
             "type": "array",
             "items": {
                 "type": "object",
+                "additionalProperties": false,
+                "required": [
+                    "id",
+                    "type",
+                    "sources",
+                    "targets"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "pattern": "^junction_[0-9]+$"
+                    },
+                    "type": {
+                        "type": "string",
+                        "enum": [
+                            "T-junction",
+                            "Y-junction"
+                        ],
+                        "description": "Geometric shape of the junction. Y-junctions are binary only (exactly 3 ports: a 1->2 split or a 2->1 merge); T-junctions apply at any width."
+                    },
+                    "sources": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 5,
+                        "items": {
+                            "type": "string",
+                            "pattern": "^((inlet|mixer|delay|chamber|droplet|tesla_valve|filter|junction)_[0-9]+|filter_[0-9]+_(smaller|larger))$"
+                        }
+                    },
+                    "targets": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 5,
+                        "items": {
+                            "type": "string",
+                            "pattern": "^(outlet|mixer|delay|chamber|filter|droplet|tesla_valve|junction)_[0-9]+$"
+                        }
+                    }
+                },
                 "oneOf": [
                     {
-                        "description": "Junction with one source splitting into two targets",
-                        "additionalProperties": false,
+                        "description": "Split junction: exactly 1 source, 2-5 targets.",
                         "properties": {
-                            "id": {
-                                "type": "string",
-                                "pattern": "^junction_[0-9]+$",
-                                "description": "Unique identifier for the junction"
+                            "sources": {
+                                "minItems": 1,
+                                "maxItems": 1
                             },
-                            "type": {
-                                "type": "string",
-                                "enum": [
-                                    "T-junction",
-                                    "Y-junction"
-                                ],
-                                "description": "Type of junction"
-                            },
-                            "source": {
-                                "type": "string",
-                                "pattern": "^((inlet|mixer|delay|chamber|droplet|junction)_[0-9]+|filter_[0-9]+_(smaller|larger))$",
-                                "description": "ID of the source component"
-                            },
-                            "target_1": {
-                                "type": "string",
-                                "pattern": "^((outlet|mixer|delay|chamber|filter|junction)_[0-9]+|droplet_[0-9]+_(continuous|dispersed))$",
-                                "description": "ID of the first target component"
-                            },
-                            "target_2": {
-                                "type": "string",
-                                "pattern": "^((outlet|mixer|delay|chamber|filter|junction)_[0-9]+|droplet_[0-9]+_(continuous|dispersed))$",
-                                "description": "ID of the second target component"
+                            "targets": {
+                                "minItems": 2,
+                                "maxItems": 5
                             }
-                        },
-                        "required": [
-                            "id",
-                            "type",
-                            "source",
-                            "target_1",
-                            "target_2"
-                        ]
+                        }
                     },
                     {
-                        "description": "Junction with two sources combining into one target",
+                        "description": "Merge junction: 2-5 sources, exactly 1 target.",
                         "properties": {
-                            "id": {
-                                "type": "string",
-                                "pattern": "^junction_[0-9]+$",
-                                "description": "Unique identifier for the junction"
+                            "sources": {
+                                "minItems": 2,
+                                "maxItems": 5
                             },
-                            "type": {
-                                "type": "string",
-                                "enum": [
-                                    "T-junction",
-                                    "Y-junction"
-                                ],
-                                "description": "Type of junction"
-                            },
-                            "source_1": {
-                                "type": "string",
-                                "pattern": "^((inlet|mixer|delay|chamber|droplet|junction)_[0-9]+|filter_[0-9]+_(smaller|larger))$",
-                                "description": "ID of the first source component"
-                            },
-                            "source_2": {
-                                "type": "string",
-                                "pattern": "^((inlet|mixer|delay|chamber|droplet|junction)_[0-9]+|filter_[0-9]+_(smaller|larger))$",
-                                "description": "ID of the second source component"
-                            },
-                            "target": {
-                                "type": "string",
-                                "pattern": "^((outlet|mixer|delay|chamber|filter|junction)_[0-9]+|droplet_[0-9]+_(continuous|dispersed))$",
-                                "description": "ID of the target component"
+                            "targets": {
+                                "minItems": 1,
+                                "maxItems": 1
                             }
-                        },
-                        "required": [
-                            "id",
-                            "type",
-                            "source_1",
-                            "source_2",
-                            "target"
-                        ]
+                        }
                     }
-                ]
+                ],
+                "if": {
+                    "required": [
+                        "type"
+                    ],
+                    "properties": {
+                        "type": {
+                            "const": "Y-junction"
+                        }
+                    }
+                },
+                "then": {
+                    "description": "Y-junctions are binary only: exactly 3 ports (a 1->2 split or a 2->1 merge). Multi-way junctions must be T-junctions.",
+                    "properties": {
+                        "sources": {
+                            "maxItems": 2
+                        },
+                        "targets": {
+                            "maxItems": 2
+                        }
+                    }
+                }
             }
         },
         "component_params": {
             "type": "object",
-            "description": "Parameters for components with parameters (mixers, delays, chambers, filters)",
+            "description": "Parameters per component category. All six sub-arrays must be present (empty if no components of that category).",
             "additionalProperties": false,
+            "required": [
+                "mixers",
+                "delays",
+                "chambers",
+                "filters",
+                "droplets",
+                "tesla_valves"
+            ],
             "properties": {
                 "mixers": {
                     "type": "array",
                     "items": {
                         "type": "object",
-                        "additionalProperties": false,
-                        "properties": {
-                            "id": {
-                                "type": "string",
-                                "pattern": "^mixer_[0-9]+$"
+                        "oneOf": [
+                            {
+                                "description": "Serpentine mixer (winding channel for chaotic advection).",
+                                "additionalProperties": false,
+                                "required": [
+                                    "id",
+                                    "type",
+                                    "num_turnings",
+                                    "amplitude_um",
+                                    "distance_between_turnings_um"
+                                ],
+                                "properties": {
+                                    "id": {
+                                        "type": "string",
+                                        "pattern": "^mixer_[0-9]+$"
+                                    },
+                                    "type": {
+                                        "const": "serpentine"
+                                    },
+                                    "num_turnings": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "default": 4
+                                    },
+                                    "amplitude_um": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "default": 2000
+                                    },
+                                    "distance_between_turnings_um": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "default": 200
+                                    }
+                                }
                             },
-                            "num_turnings": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "default": 4,
-                                "description": "Number of turns in the serpentine channel"
+                            {
+                                "description": "Ring mixer (looped/toroidal mixer; secondary-flow induced mixing).",
+                                "additionalProperties": false,
+                                "required": [
+                                    "id",
+                                    "type",
+                                    "diameter_um",
+                                    "num_circles",
+                                    "distance_between_circles_um"
+                                ],
+                                "properties": {
+                                    "id": {
+                                        "type": "string",
+                                        "pattern": "^mixer_[0-9]+$"
+                                    },
+                                    "type": {
+                                        "const": "ring"
+                                    },
+                                    "diameter_um": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "default": 1000
+                                    },
+                                    "num_circles": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "default": 3
+                                    },
+                                    "distance_between_circles_um": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "default": 200
+                                    }
+                                }
                             }
-                        },
-                        "required": [
-                            "id",
-                            "num_turnings"
                         ]
                     }
                 },
@@ -152,22 +225,37 @@
                     "items": {
                         "type": "object",
                         "additionalProperties": false,
+                        "required": [
+                            "id",
+                            "type",
+                            "num_turnings",
+                            "amplitude_um",
+                            "distance_between_turnings_um"
+                        ],
                         "properties": {
                             "id": {
                                 "type": "string",
                                 "pattern": "^delay_[0-9]+$"
                             },
+                            "type": {
+                                "const": "serpentine"
+                            },
                             "num_turnings": {
                                 "type": "integer",
                                 "minimum": 1,
-                                "default": 4,
-                                "description": "Number of turns in the serpentine channel"
+                                "default": 4
+                            },
+                            "amplitude_um": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 2000
+                            },
+                            "distance_between_turnings_um": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 200
                             }
-                        },
-                        "required": [
-                            "id",
-                            "num_turnings"
-                        ]
+                        }
                     }
                 },
                 "chambers": {
@@ -175,78 +263,221 @@
                     "items": {
                         "type": "object",
                         "additionalProperties": false,
+                        "required": [
+                            "id",
+                            "length_um",
+                            "width_um"
+                        ],
                         "properties": {
                             "id": {
                                 "type": "string",
                                 "pattern": "^chamber_[0-9]+$"
                             },
-                            "dimensions": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                    "length": {
-                                        "type": "integer",
-                                        "minimum": 1,
-                                        "default": 4000,
-                                        "unit": "µm",
-                                        "description": "Length in micrometers"
-                                    },
-                                    "width": {
-                                        "type": "integer",
-                                        "minimum": 1,
-                                        "default": 3200,
-                                        "unit": "µm",
-                                        "description": "Width in micrometers"
-                                    }
-                                },
-                                "required": [
-                                    "length",
-                                    "width"
-                                ]
+                            "length_um": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 4000
+                            },
+                            "width_um": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 3200
                             }
-                        },
-                        "required": [
-                            "id",
-                            "dimensions"
-                        ]
+                        }
                     }
                 },
                 "filters": {
                     "type": "array",
                     "items": {
                         "type": "object",
+                        "oneOf": [
+                            {
+                                "description": "DLD (Deterministic Lateral Displacement) filter: size-based particle separation. 1 input, 2 outputs (smaller, larger).",
+                                "additionalProperties": false,
+                                "required": [
+                                    "id",
+                                    "type",
+                                    "length_um",
+                                    "width_um",
+                                    "post_shape",
+                                    "post_diameter_um",
+                                    "row_shift_fraction",
+                                    "critical_particle_diameter_um"
+                                ],
+                                "properties": {
+                                    "id": {
+                                        "type": "string",
+                                        "pattern": "^filter_[0-9]+$"
+                                    },
+                                    "type": {
+                                        "const": "dld"
+                                    },
+                                    "length_um": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "default": 4000
+                                    },
+                                    "width_um": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "default": 3200
+                                    },
+                                    "post_shape": {
+                                        "type": "string",
+                                        "enum": [
+                                            "circle",
+                                            "square",
+                                            "triangle",
+                                            "diamond",
+                                            "hexagon"
+                                        ],
+                                        "default": "circle"
+                                    },
+                                    "post_diameter_um": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "default": 50
+                                    },
+                                    "row_shift_fraction": {
+                                        "type": "number",
+                                        "exclusiveMinimum": 0,
+                                        "maximum": 1,
+                                        "default": 0.20
+                                    },
+                                    "critical_particle_diameter_um": {
+                                        "type": "number",
+                                        "minimum": 1,
+                                        "default": 10
+                                    }
+                                }
+                            },
+                            {
+                                "description": "Pillar matrix filter: sieving / micro-structured filter. 1 input, 1 output.",
+                                "additionalProperties": false,
+                                "required": [
+                                    "id",
+                                    "type",
+                                    "length_um",
+                                    "width_um",
+                                    "post_shape",
+                                    "post_diameter_um",
+                                    "columns",
+                                    "rows"
+                                ],
+                                "properties": {
+                                    "id": {
+                                        "type": "string",
+                                        "pattern": "^filter_[0-9]+$"
+                                    },
+                                    "type": {
+                                        "const": "pillar_matrix"
+                                    },
+                                    "length_um": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "default": 4000
+                                    },
+                                    "width_um": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "default": 3200
+                                    },
+                                    "post_shape": {
+                                        "type": "string",
+                                        "enum": [
+                                            "circle",
+                                            "square",
+                                            "triangle",
+                                            "diamond",
+                                            "hexagon"
+                                        ],
+                                        "default": "circle"
+                                    },
+                                    "post_diameter_um": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "default": 400
+                                    },
+                                    "columns": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "default": 3
+                                    },
+                                    "rows": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "default": 4
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                },
+                "droplets": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
                         "additionalProperties": false,
+                        "required": [
+                            "id",
+                            "type",
+                            "nozzle_width_um"
+                        ],
                         "properties": {
                             "id": {
                                 "type": "string",
-                                "pattern": "^filter_[0-9]+$"
+                                "pattern": "^droplet_[0-9]+$"
                             },
-                            "critical_particle_diameter": {
-                                "type": "number",
+                            "type": {
+                                "type": "string",
+                                "enum": [
+                                    "t_junction",
+                                    "flow_focusing"
+                                ]
+                            },
+                            "nozzle_width_um": {
+                                "type": "integer",
                                 "minimum": 1,
-                                "default": 10,
-                                "unit": "µm",
-                                "description": "Critical particle diameter in micrometers"
+                                "default": 100
                             }
-                        },
+                        }
+                    }
+                },
+                "tesla_valves": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
                         "required": [
                             "id",
-                            "critical_particle_diameter"
-                        ]
+                            "num_segment_pairs",
+                            "segment_length_um",
+                            "segment_width_um"
+                        ],
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "pattern": "^tesla_valve_[0-9]+$"
+                            },
+                            "num_segment_pairs": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 2
+                            },
+                            "segment_length_um": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 1000
+                            },
+                            "segment_width_um": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 600
+                            }
+                        }
                     }
                 }
-            },
-            "required": [
-                "mixers",
-                "delays",
-                "chambers",
-                "filters"
-            ]
+            }
         }
-    },
-    "required": [
-        "connections",
-        "junctions",
-        "component_params"
-    ]
+    }
 }

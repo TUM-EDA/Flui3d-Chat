@@ -1,148 +1,135 @@
+"""Assemble the baseline SFT dataset from the aux-LLM-enhanced prompts.
+
+Final stage of the data pipeline. Reads the enhanced prompts returned by the OpenAI Batch API
+(``output/openai_outputs/<style>_style/*.jsonl``), pairs each with its ground-truth JSON design by
+``custom_id``, and builds 3-role conversations (system = baseline.txt, user = enhanced prompt,
+assistant = JSON design). The combined, shuffled set is saved as
+``final_datasets/baseline_sft_dataset.pkl``.
+
+Each request produced exactly one prompt (batch size 1), returned as a strict-schema JSON object
+``{"prompt": ...}`` (see ``resources/json_schemas/openai_output_schema.json``).
+
+Run from datasets/dataset_generation/ after downloading the batch outputs.
+"""
+
 import json
 import random
 import re
-import pandas as pd
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
 
-# Import settings from the configuration file
-from config import dataset_generation_config
+import pandas as pd
 
-def find_batch_file(directory: Path) -> Optional[Path]:
-    """Finds the first .jsonl file in a given directory."""
+from config import dataset_generation_config as cfg
+
+
+def _find_batch_file(directory: Path) -> Optional[Path]:
+    """Returns the single .jsonl batch-output file in a style directory (or None)."""
     if not directory.is_dir():
-        print(f"Warning: Directory not found: {directory}")
+        print(f"  Warning: directory not found: {directory}")
         return None
+    files = sorted(directory.glob("*.jsonl"))
+    if not files:
+        print(f"  Warning: no .jsonl output file in {directory}")
+        return None
+    return files[0]
+
+
+def _load_jsonl(path: Path) -> List[Dict]:
+    with path.open("r", encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def _load_ground_truth(path: Path) -> Dict[str, Dict]:
+    """Loads ground-truth designs keyed by stringified id."""
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    return {str(item["id"]): item["json"] for item in data}
+
+
+def _extract_prompt(content: str) -> Optional[str]:
+    """Pulls the ``prompt`` string from the aux-LLM response content.
+
+    Responses use structured output, so ``content`` is normally raw JSON; markdown fences and
+    surrounding prose are tolerated as a fallback.
+    """
+    if not content:
+        return None
+    obj = None
     try:
-        return next(directory.glob("*.jsonl"))
-    except StopIteration:
-        print(f"Warning: No '.jsonl' batch file found in {directory}")
-        return None
-
-def load_jsonl(file_path: Path) -> List[Dict]:
-    """Loads a JSONL file into a list of dictionaries."""
-    with file_path.open("r", encoding="utf-8") as f:
-        return [json.loads(line) for line in f]
-
-def load_json(file_path: Path) -> List[Dict]:
-    """Loads a standard JSON file."""
-    with file_path.open("r", encoding="utf-8") as f:
-        return json.load(f)
-
-def extract_json_from_text(text: str) -> Optional[Dict]:
-    """Extracts a JSON object from a markdown code block in plain text."""
-    # Find the last JSON code block to be robust
-    matches = re.findall(r"```json(.*?)```", text, re.DOTALL)
-    if not matches:
-        return None
-        
-    json_block = matches[-1]
-    # Clean up potential trailing commas that make JSON invalid
-    json_block = re.sub(r"[;,]\s*([\]}])", r"\1", json_block)
-    try:
-        return json.loads(json_block)
+        obj = json.loads(content)
     except json.JSONDecodeError:
-        print(f"Info: Could not decode extracted JSON block.")
-        return None
+        fenced = re.findall(r"```(?:json)?(.*?)```", content, re.DOTALL)
+        blocks = fenced if fenced else re.findall(r"(\{.*\})", content, re.DOTALL)
+        for block in reversed(blocks):
+            cleaned = re.sub(r"[;,]\s*([\]}])", r"\1", block.strip())
+            try:
+                obj = json.loads(cleaned)
+                break
+            except json.JSONDecodeError:
+                continue
+    if isinstance(obj, dict) and isinstance(obj.get("prompt"), str) and obj["prompt"].strip():
+        return obj["prompt"].strip()
+    return None
 
-def process_style_batch(batch_dir: Path, config_entry: Dict) -> List[List[Dict]]:
-    """
-    Processes a single style's batch output to create conversation triplets.
-    
-    Args:
-        batch_dir: The directory containing the OpenAI batch output file.
-        config_entry: The configuration dictionary for this style.
 
-    Returns:
-        A list of conversation triplets.
-    """
-    batch_file = find_batch_file(batch_dir)
-    if not batch_file:
-        return []
+def build_conversations() -> List[List[Dict]]:
+    """Pairs each enhanced prompt with its JSON design into a 3-role conversation."""
+    conversations: List[List[Dict]] = []
 
-    print(f"Processing batch file: {batch_file.name}...")
-    
-    # Load the OpenAI output and the corresponding ground-truth designs
-    batch_data = load_jsonl(batch_file)
-    ground_truth_data = load_json(config_entry["ground_truth_file"])
-    is_single_prompt = config_entry["is_single_prompt"]
-    
-    # Create a lookup map for ground-truth JSONs by their ID
-    assistant_lookup = {item['id']: item['json'] for item in ground_truth_data}
-    
-    conversations = []
-    for entry in batch_data:
-        content = entry.get("response", {}).get("body", {}).get("choices", [{}])[0].get("message", {}).get("content", "")
-        custom_id = int(entry.get("custom_id", 0))
+    for style in cfg.STYLE_CONFIG:
+        out_dir = cfg.OPENAI_OUTPUT_DIR / f"{style}_style"
+        ground_truth_path = cfg.STYLE_CONFIG[style]["ground_truth_file"]
 
-        if not content or not custom_id:
+        batch_file = _find_batch_file(out_dir)
+        if batch_file is None:
+            continue
+        if not ground_truth_path.is_file():
+            print(f"  Warning: no ground-truth file for '{style}' at {ground_truth_path}; skipping.")
             continue
 
-        prompts_list = []
-        # Extract prompts based on the style's configuration
-        if is_single_prompt:
-            prompt_object = extract_json_from_text(content)
-            if prompt_object and "prompt" in prompt_object:
-                prompts_list.append(prompt_object["prompt"])
-        else:
-            try:
-                prompts_json = json.loads(content)
-                prompts_list = [p["prompt"] for p in prompts_json.get("prompts", [])]
-                if len(prompts_list) != 10:
-                    print(f"Info: Dropped entry for custom_id {custom_id}. Expected 10 prompts, found {len(prompts_list)}.")
-                    continue
-            except (json.JSONDecodeError, TypeError):
-                print(f"Info: Could not parse JSON content for custom_id {custom_id}.")
-                continue
+        ground_truth = _load_ground_truth(ground_truth_path)
 
-        # Generate conversation triplets for each extracted prompt
-        for idx, user_message in enumerate(prompts_list):
-            conversation_id = custom_id + idx
-            assistant_message_json = assistant_lookup.get(conversation_id)
-            
-            if assistant_message_json:
-                assistant_message = json.dumps(assistant_message_json, indent=2)
-                conversations.append([
-                    {"role": "system", "content": str(dataset_generation_config.BASELINE_SYSTEM_MESSAGE)},
-                    {"role": "user", "content": str(user_message)},
-                    {"role": "assistant", "content": str(assistant_message)}
-                ])
-                
+        matched = 0
+        dropped = 0
+        for entry in _load_jsonl(batch_file):
+            cid = str(entry.get("custom_id", "")).strip()
+            content = (entry.get("response", {}).get("body", {})
+                       .get("choices", [{}])[0].get("message", {}).get("content", ""))
+            prompt = _extract_prompt(content)
+            design = ground_truth.get(cid)
+            if prompt is None or design is None:
+                dropped += 1
+                continue
+            conversations.append([
+                {"role": "system", "content": str(cfg.BASELINE_SYSTEM_MESSAGE)},
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": json.dumps(design, indent=2)},
+            ])
+            matched += 1
+        print(f"[{style}] {matched} conversations (dropped {dropped}) from {batch_file.name}.")
+
     return conversations
 
+
 def main():
-    """Main function to orchestrate the extraction and combination of data."""
-    print("--- Starting Baseline Finetuning Dataset Creation ---")
-    all_conversations = []
+    print("--- Building baseline finetuning dataset ---")
+    conversations = build_conversations()
 
-    # Process each style defined in the configuration
-    for style_path, style_config in dataset_generation_config.STYLE_CONFIG.items():
-        batch_directory = dataset_generation_config.OPENAI_OUTPUT_DIR / style_path
-        print(f"\nProcessing style directory: {batch_directory}")
-        
-        style_conversations = process_style_batch(batch_directory, style_config)
-        all_conversations.extend(style_conversations)
-        print(f"Found {len(style_conversations)} conversations for this style.")
-
-    if not all_conversations:
+    if not conversations:
         print("\nNo conversations were generated. Exiting.")
         return
 
-    print(f"\nTotal conversations combined: {len(all_conversations)}")
+    random.shuffle(conversations)
+    print(f"\nTotal conversations: {len(conversations)} (shuffled).")
 
-    # Shuffle the entire dataset for better training distribution
-    random.shuffle(all_conversations)
-    print("Shuffling complete.")
+    df = pd.DataFrame({"conversations": conversations})
+    cfg.FINAL_DATASET_DIR.mkdir(parents=True, exist_ok=True)
+    df.to_pickle(cfg.BASELINE_SFT_DATASET_PATH)
 
-    # Convert to a pandas DataFrame and save
-    df = pd.DataFrame({"conversations": all_conversations})
-    
-    # Ensure the output directory exists
-    dataset_generation_config.FINAL_DATASET_DIR.mkdir(parents=True, exist_ok=True)
-    df.to_pickle(dataset_generation_config.BASELINE_SFT_DATASET_PATH)
+    print("\n--- Baseline finetuning dataset created! ---")
+    print(f"Saved to: {cfg.BASELINE_SFT_DATASET_PATH.resolve()}")
 
-    print("\n--- Baseline Finetuning Dataset Successfully Created! ---")
-    print(f"Saved to: {dataset_generation_config.BASELINE_SFT_DATASET_PATH.resolve()}")
 
 if __name__ == "__main__":
     main()
