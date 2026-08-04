@@ -41,9 +41,9 @@ Navigate to the `Backend/designsynthesis` directory and run the following comman
 ### 3. Set Up Dependent Services
 The backend communicates with two other essential services that must be running:
 
-* **Ollama (Modified Fork)**: This project uses a custom build of Ollama to handle the LLM requests with specific grammar constraints. Clone and run it by following the instructions at:
-    * [Customized Ollama](Customized%20Ollama/README.md)
-    * Ensure the models specified in `application.properties` (e.g., `microfluidic_llama_3`, `microfluidic_qwen3_reasoning`) are pulled and available in your Ollama instance. You can find our fine-tuned models [here](https://huggingface.co/collections/TUM-EDA/flui3d-chat-models). Please refer to [Ollama's documentation](https://docs.ollama.com/import) for instructions on importing a model into Ollama.
+* **Ollama**: This project uses Ollama v0.24.0 to handle the LLM requests with specific grammar constraints. Clone and run it by following the instructions at:
+
+    * Ensure the models specified in `application.properties` (e.g., `flui3d_chat`, `flui3d_chat_reasoning`) are pulled and available in your Ollama instance. You can find our fine-tuned models [here](https://huggingface.co/collections/TUM-EDA/flui3d-chat-models). Please refer to [Ollama's documentation](https://docs.ollama.com/import) for instructions on importing a model into Ollama.
 
 * **Frontend**: This is the Vue.js single-page application that provides the user interface. Clone and run it by following the instructions at:
     * [Frontend](Frontend/README.md)
@@ -63,16 +63,14 @@ server.port=8090
 ollama.api.url=http://127.0.0.1:11434
 
 # Names of the LLMs hosted in Ollama
-ollama.modelname.baseline=microfluidic_llama_3
-ollama.modelname.reasoning=microfluidic_qwen3_reasoning
+ollama.modelname.baseline=flui3d_chat
+ollama.modelname.reasoning=flui3d_chat_reasoning
 
 # Allowed origins for Cross-Origin Resource Sharing (CORS)
 # Should match the URL of the running frontend application
 cors.allowed.origin=http://localhost:5173,http://localhost:5174
 
 # Synthesis settings
-# Timeout in seconds for generating the STL file
-desyn.stl.timeout=60
 # Gurobi solver settings for MIP (Mixed-Integer Programming)
 desyn.gurobi.focus=0
 desyn.gurobi.gap=0.02

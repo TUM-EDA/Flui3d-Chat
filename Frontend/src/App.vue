@@ -121,7 +121,21 @@
                       <label class="label">
                         <span class="label-text">{{ setting.label }}</span>
                       </label>
+                      <div v-if="setting.type === 'range'" class="range-row">
+                        <input
+                          type="range"
+                          class="range range-xs flex-1"
+                          :min="setting.min"
+                          :max="setting.max"
+                          :step="setting.step"
+                          v-model.number="setting.value"
+                        />
+                        <span class="range-side-value">
+                          {{ setting.value.toFixed(1) }}
+                        </span>
+                      </div>
                       <input
+                        v-else
                         type="number"
                         class="input input-xs w-full max-w-xs"
                         v-model.number="setting.value"
@@ -192,7 +206,13 @@
                 <div
                   v-if="
                     selectedMessagePair.assistant &&
-                    selectedMessagePair.assistant.isThinking &&
+                    (
+                    selectedMessagePair.assistant.isThinking ||
+                    (
+                    selectedMessagePair.assistant.isGenerating &&
+                    !selectedMessagePair.assistant.content
+                    )
+                    ) &&
                     !selectedMessagePair.assistant.isOptimizing
                   "
                   class="flex-1 text-neutral-content flex flex-col items-center justify-center text-center"
@@ -213,6 +233,9 @@
                 >
                   <font-awesome-icon icon="fa-solid fa-database" bounce size="2xl" class="mb-4" />
                   <p>Loading model...</p>
+                  <p></p>
+                  <p>Tip: Due to limited resource, sometimes you</p>
+                  <p>may need to resend your description.</p>
                 </div>
 
                 <!-- Chip Code -->
@@ -220,7 +243,13 @@
                   v-if="
                     selectedMessagePair.assistant &&
                     !(
-                      selectedMessagePair.assistant.isThinking &&
+                      (
+                      selectedMessagePair.assistant.isThinking ||
+                      (
+                        selectedMessagePair.assistant.isGenerating &&
+                        !selectedMessagePair.assistant.content
+                      )
+                    ) &&
                       !selectedMessagePair.assistant.isOptimizing
                     )
                   "
@@ -337,6 +366,12 @@
 
                   <template v-else>
                     <p>Chip synthesis failed.</p>
+                    <p class="text-sm text-stone-200 w-72">
+                      {{
+                        selectedMessagePair.assistant.synthesisError ||
+                        'The synthesis backend did not return a physical layout.'
+                      }}
+                    </p>
                   </template>
                 </div>
 
@@ -368,18 +403,112 @@
                       <li
                         :class="{
                           'tooltip tooltip-bottom tooltip-error':
-                            !selectedMessagePair.assistant.stlBase64,
+                            !selectedMessagePair.assistant.chipJson,
                         }"
-                        data-tip="STL generation timed out"
+                        data-tip="Physical layout not available"
                       >
                         <a
                           @click="downloadSTL"
                           :class="{
                             'pointer-events-none opacity-50 cursor-not-allowed':
-                              !selectedMessagePair.assistant.stlBase64,
+                              !selectedMessagePair.assistant.chipJson ||
+                              isGeneratingStl ||
+                              isGeneratingStep ||
+                              isGeneratingInternalStep,
                           }"
-                          >Download STL (3D)</a
                         >
+                          <span
+                            v-if="isGeneratingStl"
+                            class="loading loading-spinner loading-xs"
+                          ></span>
+                          {{ isGeneratingStl ? 'Generating STL...' : 'Download STL (3D)' }}
+                        </a
+                        >
+                      </li>
+                      <li
+                        :class="{
+                          'tooltip tooltip-bottom tooltip-error':
+                            !selectedMessagePair.assistant.chipJson,
+                        }"
+                        data-tip="Physical layout not available"
+                      >
+                        <a
+                          @click="downloadSTEP"
+                          :class="{
+                            'pointer-events-none opacity-50 cursor-not-allowed':
+                              !selectedMessagePair.assistant.chipJson ||
+                              isGeneratingStep ||
+                              isGeneratingInternalStep,
+                          }"
+                        >
+                          <span v-if="isGeneratingStep" class="loading loading-spinner loading-xs"></span>
+                          {{ isGeneratingStep ? 'Generating STEP...' : 'Download STEP (3D)' }}
+                        </a>
+                      </li>
+                      <li
+                        :class="{
+                          'tooltip tooltip-bottom tooltip-error':
+                            !selectedMessagePair.assistant.chipJson,
+                        }"
+                        data-tip="Physical layout not available"
+                      >
+                        <a
+                          @click="downloadInternalSTEP"
+                          :class="{
+                            'pointer-events-none opacity-50 cursor-not-allowed':
+                              !selectedMessagePair.assistant.chipJson ||
+                              isGeneratingStep ||
+                              isGeneratingInternalStep,
+                          }"
+                        >
+                          <span
+                            v-if="isGeneratingInternalStep"
+                            class="loading loading-spinner loading-xs"
+                          ></span>
+                          {{
+                            isGeneratingInternalStep
+                              ? 'Generating Internal STEP...'
+                              : 'Download STEP (3D) -Internal Features Only'
+                          }}
+                        </a>
+                      </li>
+                      <li>
+                        <a
+                          @click="downloadComsolJava('2D')"
+                          :class="{
+                            'pointer-events-none opacity-50 cursor-not-allowed':
+                              isGeneratingComsol2D || isGeneratingComsol3D,
+                          }"
+                        >
+                          <span
+                            v-if="isGeneratingComsol2D"
+                            class="loading loading-spinner loading-xs"
+                          ></span>
+                          {{
+                            isGeneratingComsol2D
+                              ? 'Generating COMSOL 2D...'
+                              : 'Download COMSOL Simulation Script (2D)'
+                          }}
+                        </a>
+                      </li>
+                      <li>
+                        <a
+                          @click="downloadComsolJava('3D')"
+                          :class="{
+                            'pointer-events-none opacity-50 cursor-not-allowed':
+                              isGeneratingComsol2D || isGeneratingComsol3D,
+                          }"
+                        >
+                          <span
+                            v-if="isGeneratingComsol3D"
+                            class="loading loading-spinner loading-xs"
+                          ></span>
+                          {{
+                            isGeneratingComsol3D
+                              ? 'Generating COMSOL 3D...'
+                              : 'Download COMSOL Simulation Script (3D)'
+                          }}
+                        </a>
                       </li>
                     </ul>
                   </div>
@@ -648,6 +777,8 @@ import {
   type ChatResponse,
   type ErrorResponse,
 } from '@/utils/chat-stream-utils'
+import { exportStepInWorker } from '@/utils/step-generator/exportStepInWorker'
+import { exportStlInWorker } from '@/utils/stl-generator/exportStlInWorker'
 import 'highlight.js/styles/vs2015.css'
 import hljs from 'highlight.js/lib/core'
 import json from 'highlight.js/lib/languages/json'
@@ -668,6 +799,8 @@ interface UserMessage extends BaseMessage {
   problemsHovered?: never
   chipSvg?: never
   stlBase64?: never
+  chipJson?: never
+  synthesisError?: never
   activePanel?: never
 }
 
@@ -682,10 +815,21 @@ interface AssistantMessage extends BaseMessage {
   problemsHovered?: boolean
   chipSvg?: string
   stlBase64?: string
+  chipJson?: string
+  synthesisError?: string
   activePanel: 'code' | 'svg'
 }
 
 type ChatMessage = UserMessage | AssistantMessage
+
+interface SettingConfig {
+  label: string
+  value: number
+  min?: number
+  max?: number
+  step?: number
+  type?: 'range'
+}
 
 export default {
   name: 'Flui3dChat',
@@ -693,6 +837,7 @@ export default {
     hljs.registerLanguage('json', json)
 
     const apiUrl = import.meta.env.VITE_API_URL
+    const synthesisApiUrl = import.meta.env.VITE_SYNTHESIS_API_URL || apiUrl
     const chatMessages = ref<ChatMessage[]>([])
     const messagePairIdCounter = ref(0)
     const userMessage = ref('')
@@ -703,23 +848,30 @@ export default {
     const selectedMessagePairId = ref<number>(0)
     const selectedView = ref<number>(0)
     const currentTime = ref(Date.now())
-    const settings = ref({
+    const settings = ref<Record<string, SettingConfig>>({
       chipMargin: { label: 'Chip Margin', value: 600 },
+      height: { label: '3D Chip Thickness', value: 3000 },
       layerHeight: { label: 'Layer Height', value: 200 },
       moduleMargin: { label: 'Module Margin', value: 400 },
       channelWidth: { label: 'Channel Width', value: 200 },
       channelMargin: { label: 'Channel Margin', value: 200 },
       portDiameter: { label: 'Port Diameter', value: 400 },
-      serpentineWidth: { label: 'Serpentine Channel Width', value: 4000 },
-      filterWidth: { label: 'Filter Width', value: 4000 },
-      filterHeight: { label: 'Filter Height', value: 1200 },
-      filterPillarRadius: { label: 'Filter Pillar Radius', value: 10 },
       maxRetries: { label: 'Maximum Retry Attempts', value: 3 },
+      objectiveWidthWeight: {
+        label: 'Chip Ratio (Optim. Goal)',
+        value: 0.1,
+        min: 0.1,
+        max: 0.9,
+        step: 0.1,
+        type: 'range',
+      },
     })
 
-    const enforceInteger = (obj: { [key: string]: { value: number } }) => {
+    const enforceInteger = (obj: Record<string, SettingConfig>) => {
       Object.keys(obj).forEach((key) => {
-        obj[key].value = Math.max(1, Math.round(Number(obj[key].value)) || 0)
+        const setting = obj[key]
+        if (setting.type === 'range' && setting.step !== undefined && setting.step < 1) return
+        setting.value = Math.max(1, Math.round(Number(setting.value)) || 0)
       })
     }
 
@@ -896,7 +1048,7 @@ export default {
         activePanel: 'code',
       })
       let retries = 0
-
+      
       try {
         while (retries <= settings.value.maxRetries.value) {
           // Measure time (in milliseconds)
@@ -1063,14 +1215,28 @@ export default {
           // Clean up once streaming is complete
           assistantMessage.value.content = newMessage
 
+          let chipDesign: unknown
+
+          try {
+            chipDesign = JSON.parse(assistantMessage.value.content)
+          } catch {
+            assistantMessage.value.isGenerating = false
+            assistantMessage.value.isOptimizing = false
+            assistantMessage.value.problems = ['Generated output is not valid JSON.']
+            assistantMessage.value.activePanel = 'code'
+            toast.dismiss('optimization_info_toast')
+            toast.error('Generated output is not valid JSON.')
+            break
+          }
+
           // Validate the assistant's response
-          const validationResponse = await fetch(`${apiUrl}/api/validate`, {
+          const validationResponse = await fetch(`${synthesisApiUrl}/api/validate`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              chipDesign: JSON.parse(assistantMessage.value.content),
+              chipDesign,
               fixJunctions: retries >= settings.value.maxRetries.value - 1,
             }),
           })
@@ -1235,10 +1401,11 @@ export default {
       try {
         // Set loading state
         assistantMessage.value.isSynthesizing = true
+        assistantMessage.value.synthesisError = undefined
         assistantMessage.value.activePanel = 'svg'
 
         // Make API call
-        const response = await fetch(`${apiUrl}/api/synthesize`, {
+        const response = await fetch(`${synthesisApiUrl}/api/synthesize`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1248,22 +1415,23 @@ export default {
             chipDesign: JSON.parse(assistantMessage.value.content),
             settings: {
               chipMargin: settings.value.chipMargin.value,
+              height: settings.value.height.value,
               layerHeight: settings.value.layerHeight.value,
               moduleMargin: settings.value.moduleMargin.value,
               channelWidth: settings.value.channelWidth.value,
               channelMargin: settings.value.channelMargin.value,
               portDiameter: settings.value.portDiameter.value,
-              serpentineWidth: settings.value.serpentineWidth.value,
-              filterWidth: settings.value.filterWidth.value,
-              filterHeight: settings.value.filterHeight.value,
-              filterPillarRadius: settings.value.filterPillarRadius.value,
+              objectiveWidthWeight: settings.value.objectiveWidthWeight.value,
             },
           }),
         })
 
         // Check if response is okay
         if (!response.ok) {
-          throw new Error('Synthesis API call failed.')
+          const details = await response.text()
+          throw new Error(
+            `Synthesis API call failed (${response.status})${details && details !== '{}' ? `: ${details}` : ''}`,
+          )
         }
 
         const json = await response.json()
@@ -1294,8 +1462,14 @@ export default {
         if (json.stlBase64) {
           assistantMessage.value.stlBase64 = json.stlBase64
         }
+        if (json.chipJson) {
+          assistantMessage.value.chipJson = json.chipJson
+        }
       } catch (error) {
         console.error('Error synthesizing chip:', error)
+        assistantMessage.value.synthesisError =
+          error instanceof Error ? error.message : 'Unknown synthesis error.'
+        toast.error(assistantMessage.value.synthesisError)
       } finally {
         // Reset loading state regardless of success/error
         assistantMessage.value.isSynthesizing = false
@@ -1403,26 +1577,167 @@ export default {
       }
     }
 
-    const downloadSTL = () => {
+    const isGeneratingStl = ref(false)
+
+    const downloadSTL = async () => {
       if (
         selectedMessagePair.value &&
         selectedMessagePair.value.assistant &&
-        selectedMessagePair.value.assistant.stlBase64
+        selectedMessagePair.value.assistant.chipJson
       ) {
-        const blob = new Blob(
-          [
-            Uint8Array.from(atob(selectedMessagePair.value.assistant.stlBase64), (c) =>
-              c.charCodeAt(0),
-            ),
-          ],
-          { type: 'model/stl' },
+        const generatingToastId = toast.info('Generating STL, please wait...', {
+          timeout: false,
+          closeOnClick: false,
+          draggable: false,
+        })
+        try {
+          isGeneratingStl.value = true
+          const chipData = JSON.parse(selectedMessagePair.value.assistant.chipJson)
+          const blob = await exportStlInWorker(chipData)
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = 'microfluidic_chip.stl'
+          a.click()
+          URL.revokeObjectURL(url)
+          toast.dismiss(generatingToastId)
+          toast.success('STL file exported successfully!')
+        } catch (error) {
+          console.error('Error exporting STL:', error)
+          toast.dismiss(generatingToastId)
+          toast.error('Failed to export STL file.')
+        } finally {
+          toast.dismiss(generatingToastId)
+          isGeneratingStl.value = false
+        }
+      }
+    }
+
+    const isGeneratingStep = ref(false)
+    const isGeneratingInternalStep = ref(false)
+    const isGeneratingComsol2D = ref(false)
+    const isGeneratingComsol3D = ref(false)
+
+    const exportSTEP = async (internalOnly: boolean) => {
+      if (
+        selectedMessagePair.value &&
+        selectedMessagePair.value.assistant &&
+        selectedMessagePair.value.assistant.chipJson
+      ) {
+        const generatingToastId = toast.info(
+          internalOnly
+            ? 'Generating internal STEP, please wait...'
+            : 'Generating STEP, please wait...',
+          {
+            timeout: false,
+            closeOnClick: false,
+            draggable: false,
+          },
         )
+        try {
+          if (internalOnly) {
+            isGeneratingInternalStep.value = true
+          } else {
+            isGeneratingStep.value = true
+          }
+          const chipData = JSON.parse(selectedMessagePair.value.assistant.chipJson)
+          const blob = await exportStepInWorker(chipData, internalOnly)
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = internalOnly
+            ? 'microfluidic_chip_internal.step'
+            : 'microfluidic_chip.step'
+          a.click()
+          URL.revokeObjectURL(url)
+          toast.dismiss(generatingToastId)
+          toast.success(
+            internalOnly
+              ? 'Internal STEP file exported successfully!'
+              : 'STEP file exported successfully!',
+          )
+        } catch (error) {
+          console.error('Error exporting STEP:', error)
+          toast.dismiss(generatingToastId)
+          toast.error('Failed to export STEP file.')
+        } finally {
+          toast.dismiss(generatingToastId)
+          if (internalOnly) {
+            isGeneratingInternalStep.value = false
+          } else {
+            isGeneratingStep.value = false
+          }
+        }
+      }
+    }
+
+    const downloadSTEP = () => exportSTEP(false)
+    const downloadInternalSTEP = () => exportSTEP(true)
+
+    const downloadComsolJava = async (dimension: '2D' | '3D') => {
+      if (
+        !selectedMessagePair.value ||
+        !selectedMessagePair.value.assistant ||
+        !selectedMessagePair.value.assistant.content
+      ) {
+        return
+      }
+
+      try {
+        if (dimension === '2D') {
+          isGeneratingComsol2D.value = true
+        } else {
+          isGeneratingComsol3D.value = true
+        }
+
+        const className = `MicrofluidicChipModel${dimension}`
+        const response = await fetch(`${synthesisApiUrl}/api/comsol/package`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/zip',
+          },
+          body: JSON.stringify({
+            chipDesign: JSON.parse(selectedMessagePair.value.assistant.content),
+            settings: {
+              chipMargin: settings.value.chipMargin.value,
+              height: settings.value.height.value,
+              layerHeight: settings.value.layerHeight.value,
+              moduleMargin: settings.value.moduleMargin.value,
+              channelWidth: settings.value.channelWidth.value,
+              channelMargin: settings.value.channelMargin.value,
+              portDiameter: settings.value.portDiameter.value,
+              objectiveWidthWeight: settings.value.objectiveWidthWeight.value,
+            },
+            dimension,
+            className,
+          }),
+        })
+
+        if (!response.ok) {
+          const details = await response.text()
+          throw new Error(
+            `COMSOL package API call failed (${response.status})${details && details !== '{}' ? `: ${details}` : ''}`,
+          )
+        }
+
+        const blob = await response.blob()
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = 'microfluidic_chip.stl'
+        a.download = `${className}.zip`
         a.click()
         URL.revokeObjectURL(url)
+        toast.success(`COMSOL ${dimension} package exported successfully!`)
+      } catch (error) {
+        console.error('Error exporting COMSOL package:', error)
+        toast.error(error instanceof Error ? error.message : 'Failed to export COMSOL package.')
+      } finally {
+        if (dimension === '2D') {
+          isGeneratingComsol2D.value = false
+        } else {
+          isGeneratingComsol3D.value = false
+        }
       }
     }
 
@@ -1452,6 +1767,14 @@ export default {
       trimmedLines,
       downloadSVG,
       downloadSTL,
+      isGeneratingStl,
+      isGeneratingStep,
+      isGeneratingInternalStep,
+      isGeneratingComsol2D,
+      isGeneratingComsol3D,
+      downloadSTEP,
+      downloadInternalSTEP,
+      downloadComsolJava,
     }
   },
 }
@@ -1490,5 +1813,20 @@ export default {
 
 .animate-loading {
   animation: loading 3.5s infinite linear;
+}
+
+.range-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.range-side-value {
+  min-width: 2rem;
+  color: hsl(var(--bc));
+  font-size: 0.875rem;
+  line-height: 1;
+  text-align: right;
+  white-space: nowrap;
 }
 </style>

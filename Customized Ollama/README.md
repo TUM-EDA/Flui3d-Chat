@@ -6,6 +6,8 @@
 
 # Ollama (LLM4MF Fork)
 
+**You can use either the official Ollama v0.24.0 release or this modified version.** If you choose to use the modified version, you will need to update the parameters sent to Ollama in the backend (`Backend/src/com/fluidllm/fluidllm_backend/controller.java`) so that they match the modified Ollama API endpoint.
+
 This is a fork of the official [Ollama](https://github.com/ollama/ollama) repository, adapted for the LLM-Based Online Design Platform for Microfluidics.
 
 The primary modification enhances the `/api/chat` endpoint's `format` parameter.
