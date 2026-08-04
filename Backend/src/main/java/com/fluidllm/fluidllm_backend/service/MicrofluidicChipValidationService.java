@@ -1,22 +1,32 @@
 package com.fluidllm.fluidllm_backend.service;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-
-import org.jgrapht.Graph;
-import org.jgrapht.graph.DirectedMultigraph;
-import org.jgrapht.graph.DefaultEdge;
-import org.jgrapht.GraphPath;
-import org.jgrapht.alg.shortestpath.AllDirectedPaths;
-
-import org.springframework.stereotype.Service;
-
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
-import java.util.function.Function;
+
+import org.jgrapht.Graph;
+import org.jgrapht.GraphPath;
+import org.jgrapht.alg.shortestpath.AllDirectedPaths;
+import org.jgrapht.graph.DefaultEdge;
+import org.jgrapht.graph.DirectedMultigraph;
+import org.springframework.stereotype.Service;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import javafx.util.Pair;
 
@@ -53,23 +63,26 @@ public class MicrofluidicChipValidationService {
         // Step 2: Validate and add missing component parameters
         hasChanges |= validateAndFixComponentParams(workingCopy);
 
-        // Steps 3-5: Validate junctions (if fixJunctions=false these steps only collect
+        // Step 3: Normalize junction definitions
+        hasChanges |= normalizeJunctionDefinitions(workingCopy);
+
+        // Steps 4-6: Validate junctions (if fixJunctions=false these steps only collect
         // problems)
         do {
             problems.clear();
             boolean localChanges = false;
 
-            // Step 3: Validate/fix junction references
+            // Step 4: Validate/fix junction references
             localChanges |= validateJunctionReferences(workingCopy, problems, fixJunctions);
 
-            // Step 4: Validate/fix junction connectivity
+            // Step 5: Validate/fix junction connectivity
             localChanges |= validateJunctionConnectivity(workingCopy, problems, fixJunctions);
 
             hasChanges |= localChanges;
         } while (fixJunctions && !problems.isEmpty());
 
         if (problems.isEmpty()) {
-            // Step 5: Validate/fix junction flows
+            // Step 6: Validate/fix junction flows
             hasChanges |= validateJunctionFlows(workingCopy, problems, addedJunctions, fixJunctions);
         }
 
@@ -96,16 +109,28 @@ public class MicrofluidicChipValidationService {
         Map<String, Set<String>> filterPorts = new HashMap<>();
         boolean hasChanges = false;
 
+        // Build a set of DLD filter IDs to distinguish from pillar_matrix filters
+        Set<String> dldFilterIds = new HashSet<>();
+        JsonNode filterParams = chipDesign.get("component_params").get("filters");
+        if (filterParams != null) {
+            for (JsonNode fp : filterParams) {
+                if (fp.has("type") && "dld".equals(fp.get("type").asText())) {
+                    dldFilterIds.add(fp.get("id").asText());
+                }
+            }
+        }
+
         // Collect all sources and targets
         for (JsonNode connection : chipDesign.get("connections")) {
             String source = connection.get("source").asText();
             String target = connection.get("target").asText();
 
-            // Track droplet and filter specific ports
+            // v2: droplet generators have a single port (droplet_N), no sub-ports
             if (source.startsWith("droplet_")) {
-                dropletPorts.computeIfAbsent(source, k -> new HashSet<>()).add(source);
-                sources.add(source);
-            } else if (source.startsWith("filter_")) {
+                String baseId = extractBaseId(source, "droplet_");
+                dropletPorts.computeIfAbsent(baseId, k -> new HashSet<>()).add(source);
+                sources.add(baseId);
+            } else if (source.startsWith("filter_") && source.matches(".*_(smaller|larger)$")) {
                 String baseId = source.substring(0, source.lastIndexOf('_'));
                 filterPorts.computeIfAbsent(baseId, k -> new HashSet<>()).add(source);
                 sources.add(baseId);
@@ -114,7 +139,7 @@ public class MicrofluidicChipValidationService {
             }
 
             if (target.startsWith("droplet_")) {
-                String baseId = target.substring(0, target.lastIndexOf('_'));
+                String baseId = extractBaseId(target, "droplet_");
                 dropletPorts.computeIfAbsent(baseId, k -> new HashSet<>()).add(target);
                 targets.add(baseId);
             } else if (target.startsWith("filter_")) {
@@ -131,10 +156,10 @@ public class MicrofluidicChipValidationService {
         int nextInletId = getNextComponentId(sources, "inlet_");
         int nextOutletId = getNextComponentId(targets, "outlet_");
 
-        // Fix regular components
+        // Fix regular components (including tesla_valve)
         for (String source : new HashSet<>(sources)) {
             if (!source.startsWith("inlet_") && !source.contains("_smaller") && !source.contains("_larger") &&
-                    !source.contains("_continuous") && !source.contains("_dispersed") && !targets.contains(source)) {
+                    !targets.contains(source)) {
                 connectionsArray.add(objectMapper.createObjectNode()
                         .put("source", "inlet_" + nextInletId++)
                         .put("target", source));
@@ -144,7 +169,7 @@ public class MicrofluidicChipValidationService {
 
         for (String target : new HashSet<>(targets)) {
             if (!target.startsWith("outlet_") && !target.contains("_smaller") && !target.contains("_larger") &&
-                    !target.contains("_continuous") && !target.contains("_dispersed") && !sources.contains(target)) {
+                    !sources.contains(target)) {
                 connectionsArray.add(objectMapper.createObjectNode()
                         .put("source", target)
                         .put("target", "outlet_" + nextOutletId++));
@@ -152,24 +177,20 @@ public class MicrofluidicChipValidationService {
             }
         }
 
-        // Fix droplet generators
+        // v2: Fix droplet generators — single input port only
         for (Map.Entry<String, Set<String>> entry : dropletPorts.entrySet()) {
             String baseId = entry.getKey();
             Set<String> ports = entry.getValue();
 
-            if (!ports.contains(baseId + "_continuous")) {
+            // Ensure there is an inlet connection to the droplet
+            if (!ports.contains(baseId) && !targets.contains(baseId)) {
                 connectionsArray.add(objectMapper.createObjectNode()
                         .put("source", "inlet_" + nextInletId++)
-                        .put("target", baseId + "_continuous"));
+                        .put("target", baseId));
                 hasChanges = true;
             }
-            if (!ports.contains(baseId + "_dispersed")) {
-                connectionsArray.add(objectMapper.createObjectNode()
-                        .put("source", "inlet_" + nextInletId++)
-                        .put("target", baseId + "_dispersed"));
-                hasChanges = true;
-            }
-            if (!ports.contains(baseId)) {
+            // Ensure there is an outlet connection from the droplet
+            if (!sources.contains(baseId)) {
                 connectionsArray.add(objectMapper.createObjectNode()
                         .put("source", baseId)
                         .put("target", "outlet_" + nextOutletId++));
@@ -177,22 +198,25 @@ public class MicrofluidicChipValidationService {
             }
         }
 
-        // Fix filters
+        // Fix DLD filters (2 outputs: smaller/larger)
         for (Map.Entry<String, Set<String>> entry : filterPorts.entrySet()) {
             String baseId = entry.getKey();
             Set<String> ports = entry.getValue();
 
-            if (!ports.contains(baseId + "_smaller")) {
-                connectionsArray.add(objectMapper.createObjectNode()
-                        .put("source", baseId + "_smaller")
-                        .put("target", "outlet_" + nextOutletId++));
-                hasChanges = true;
-            }
-            if (!ports.contains(baseId + "_larger")) {
-                connectionsArray.add(objectMapper.createObjectNode()
-                        .put("source", baseId + "_larger")
-                        .put("target", "outlet_" + nextOutletId++));
-                hasChanges = true;
+            // Only add smaller/larger outputs for DLD-type filters
+            if (dldFilterIds.contains(baseId)) {
+                if (!ports.contains(baseId + "_smaller")) {
+                    connectionsArray.add(objectMapper.createObjectNode()
+                            .put("source", baseId + "_smaller")
+                            .put("target", "outlet_" + nextOutletId++));
+                    hasChanges = true;
+                }
+                if (!ports.contains(baseId + "_larger")) {
+                    connectionsArray.add(objectMapper.createObjectNode()
+                            .put("source", baseId + "_larger")
+                            .put("target", "outlet_" + nextOutletId++));
+                    hasChanges = true;
+                }
             }
             if (!ports.contains(baseId)) {
                 connectionsArray.add(objectMapper.createObjectNode()
@@ -203,6 +227,16 @@ public class MicrofluidicChipValidationService {
         }
 
         return hasChanges;
+    }
+
+    /**
+     * Extracts the base ID (prefix + number) from a component ID string.
+     * E.g., "droplet_1" from "droplet_1" or "droplet_1_something".
+     */
+    private String extractBaseId(String id, String prefix) {
+        String rest = id.substring(prefix.length());
+        String[] parts = rest.split("_", 2);
+        return prefix + parts[0];
     }
 
     /**
@@ -222,24 +256,173 @@ public class MicrofluidicChipValidationService {
             String target = connection.get("target").asText();
 
             if (source.startsWith("mixer_") || source.startsWith("delay_") ||
-                    source.startsWith("chamber_") || source.startsWith("filter_")) {
-                usedComponents.add(source.split("_")[0] + "_" + source.split("_")[1]);
+                    source.startsWith("chamber_") || source.startsWith("filter_") ||
+                    source.startsWith("droplet_") || source.startsWith("tesla_valve_")) {
+                // v2: tesla_valve has 3-part ID (tesla_valve_N)
+                if (source.startsWith("tesla_valve_")) {
+                    String[] parts = source.split("_");
+                    if (parts.length >= 3) usedComponents.add(parts[0] + "_" + parts[1] + "_" + parts[2]);
+                } else {
+                    usedComponents.add(source.split("_")[0] + "_" + source.split("_")[1]);
+                }
             }
             if (target.startsWith("mixer_") || target.startsWith("delay_") ||
-                    target.startsWith("chamber_") || target.startsWith("filter_")) {
-                usedComponents.add(target.split("_")[0] + "_" + target.split("_")[1]);
+                    target.startsWith("chamber_") || target.startsWith("filter_") ||
+                    target.startsWith("droplet_") || target.startsWith("tesla_valve_")) {
+                if (target.startsWith("tesla_valve_")) {
+                    String[] parts = target.split("_");
+                    if (parts.length >= 3) usedComponents.add(parts[0] + "_" + parts[1] + "_" + parts[2]);
+                } else {
+                    usedComponents.add(target.split("_")[0] + "_" + target.split("_")[1]);
+                }
             }
         }
 
         ObjectNode componentParams = (ObjectNode) chipDesign.get("component_params");
+
+        // Ensure all v2 param buckets exist
+        if (!componentParams.has("droplets")) componentParams.putArray("droplets");
+        if (!componentParams.has("tesla_valves")) componentParams.putArray("tesla_valves");
 
         // Check and update parameters for each component type
         hasChanges |= updateComponentParams(componentParams, "mixers", usedComponents, "mixer_");
         hasChanges |= updateComponentParams(componentParams, "delays", usedComponents, "delay_");
         hasChanges |= updateComponentParams(componentParams, "chambers", usedComponents, "chamber_");
         hasChanges |= updateComponentParams(componentParams, "filters", usedComponents, "filter_");
+        hasChanges |= updateComponentParams(componentParams, "droplets", usedComponents, "droplet_");
+        hasChanges |= updateComponentParams(componentParams, "tesla_valves", usedComponents, "tesla_valve_");
 
         return hasChanges;
+    }
+
+    /**
+     * Normalizes junction definitions before the stricter junction validation
+     * steps run. This fills missing junction IDs, accepts common singular field
+     * names from model output, such as source/target, normalizes common junction
+     * ID aliases like merge_N, split_N, and juction_N to junction_N, and
+     * rewrites sources[]/targets[] references to match any renamed junction IDs.
+     * Unknown malformed junction IDs are assigned the next available junction_N
+     * name so later validation steps can rely on the standard junction ID format.
+     */
+    private boolean normalizeJunctionDefinitions(ObjectNode chipDesign) {
+        JsonNode junctionsNode = chipDesign.get("junctions");
+        if (!(junctionsNode instanceof ArrayNode junctions)) {
+            return false;
+        }
+
+        boolean hasChanges = false;
+        Set<String> usedIds = new HashSet<>();
+        Map<String, String> renameMap = new HashMap<>();
+
+        for (JsonNode junction : junctions) {
+            String id = junction.path("id").asText("").trim();
+            if (isValidJunctionId(id)) {
+                usedIds.add(id);
+            }
+        }
+
+        int nextJunctionId = 1;
+        for (JsonNode junction : junctions) {
+            if (!(junction instanceof ObjectNode junctionObject)) {
+                continue;
+            }
+
+            hasChanges |= normalizeJunctionArrayField(junctionObject, "source", "sources");
+            hasChanges |= normalizeJunctionArrayField(junctionObject, "target", "targets");
+
+            String id = junctionObject.path("id").asText("").trim();
+            if (id.isBlank()) {
+                String replacementId = nextAvailableJunctionId(usedIds, nextJunctionId);
+                nextJunctionId = Integer.parseInt(replacementId.replace("junction_", "")) + 1;
+                junctionObject.put("id", replacementId);
+                usedIds.add(replacementId);
+                hasChanges = true;
+                continue;
+            }
+
+            String normalizedId = normalizeJunctionId(id);
+            if (!isValidJunctionId(id)) {
+                String replacementId = normalizedId;
+                if (!isValidJunctionId(replacementId) || usedIds.contains(replacementId)) {
+                    replacementId = nextAvailableJunctionId(usedIds, nextJunctionId);
+                    nextJunctionId = Integer.parseInt(replacementId.replace("junction_", "")) + 1;
+                }
+
+                junctionObject.put("id", replacementId);
+                renameMap.put(id, replacementId);
+                usedIds.add(replacementId);
+                hasChanges = true;
+            }
+        }
+
+        if (!renameMap.isEmpty()) {
+            for (JsonNode junction : junctions) {
+                if (junction instanceof ObjectNode junctionObject) {
+                    hasChanges |= renameJunctionArrayReferences(junctionObject, renameMap, "sources");
+                    hasChanges |= renameJunctionArrayReferences(junctionObject, renameMap, "targets");
+                }
+            }
+        }
+
+        return hasChanges;
+    }
+
+    private boolean isValidJunctionId(String id) {
+        return id.matches("^junction_[0-9]+$");
+    }
+
+    private String normalizeJunctionId(String id) {
+        String trimmedId = id.trim();
+        if (trimmedId.matches("(?i)^(junction|juction|merge|split)_[0-9]+$")) {
+            return "junction_" + trimmedId.substring(trimmedId.lastIndexOf('_') + 1);
+        }
+        return trimmedId;
+    }
+
+    private String nextAvailableJunctionId(Set<String> usedIds, int startAt) {
+        int nextId = Math.max(1, startAt);
+        String replacementId;
+        do {
+            replacementId = "junction_" + nextId++;
+        } while (usedIds.contains(replacementId));
+        return replacementId;
+    }
+
+    private boolean renameJunctionArrayReferences(ObjectNode junction, Map<String, String> renameMap, String arrayField) {
+        JsonNode values = junction.get(arrayField);
+        if (!(values instanceof ArrayNode arrayValues)) {
+            return false;
+        }
+
+        boolean hasChanges = false;
+        ArrayNode updatedValues = objectMapper.createArrayNode();
+        for (JsonNode value : arrayValues) {
+            String oldValue = value.asText();
+            String newValue = renameMap.getOrDefault(oldValue, oldValue);
+            updatedValues.add(newValue);
+            hasChanges |= !oldValue.equals(newValue);
+        }
+        junction.set(arrayField, updatedValues);
+        return hasChanges;
+    }
+
+    private boolean normalizeJunctionArrayField(ObjectNode junction, String singularField, String arrayField) {
+        if (junction.has(arrayField) || !junction.has(singularField)) {
+            return false;
+        }
+
+        JsonNode singularValue = junction.get(singularField);
+        if (singularValue.isArray()) {
+            junction.set(arrayField, singularValue);
+        } else if (!singularValue.isNull()) {
+            ArrayNode values = objectMapper.createArrayNode();
+            values.add(singularValue.asText());
+            junction.set(arrayField, values);
+        } else {
+            junction.putArray(arrayField);
+        }
+        junction.remove(singularField);
+        return true;
     }
 
     /**
@@ -317,25 +500,33 @@ public class MicrofluidicChipValidationService {
         Map<String, List<String>> sourceUsage = new HashMap<>();
         Map<String, List<String>> targetUsage = new HashMap<>();
 
-        // Build junction connectivity map
+        // Build junction connectivity map (v2: sources[] and targets[] arrays)
         for (JsonNode junction : chipDesign.get("junctions")) {
             String junctionId = junction.get("id").asText();
             Set<String> sources = new HashSet<>();
             Set<String> targets = new HashSet<>();
 
-            if (junction.has("source")) {
-                sources.add(junction.get("source").asText());
+            for (JsonNode s : junction.get("sources")) {
+                sources.add(s.asText());
             }
-            if (junction.has("source_1")) {
-                sources.add(junction.get("source_1").asText());
-                sources.add(junction.get("source_2").asText());
+            for (JsonNode t : junction.get("targets")) {
+                targets.add(t.asText());
             }
-            if (junction.has("target")) {
-                targets.add(junction.get("target").asText());
-            }
-            if (junction.has("target_1")) {
-                targets.add(junction.get("target_1").asText());
-                targets.add(junction.get("target_2").asText());
+
+            int sourceCount = sources.size();
+            int targetCount = targets.size();
+            int totalPorts = sourceCount + targetCount;
+            boolean validSplit = sourceCount == 1 && targetCount >= 2 && targetCount <= 5;
+            boolean validMerge = sourceCount >= 2 && sourceCount <= 5 && targetCount == 1;
+
+            if (totalPorts < 3 || totalPorts > 6 || (!validSplit && !validMerge)) {
+                problems.add("Junction " + junctionId +
+                        " must be either a split (1 source, 2-5 targets) or a merge (2-5 sources, 1 target), with total ports between 3 and 6");
+                if (fixJunctions) {
+                    junctionsToRemove.add(junctionId);
+                    hasChanges = true;
+                }
+                continue;
             }
 
             junctionSources.put(junctionId, sources);
@@ -507,38 +698,48 @@ public class MicrofluidicChipValidationService {
         // Add vertices and edges from junctions
         for (JsonNode junction : chipDesign.get("junctions")) {
             String junctionId = junction.get("id").asText();
+            JsonNode sources = junction.get("sources");
+            JsonNode targets = junction.get("targets");
+            if (sources == null || !sources.isArray() || targets == null || !targets.isArray()) {
+                continue;
+            }
+            int sourceCount = sources.size();
+            int targetCount = targets.size();
+            int totalPorts = sourceCount + targetCount;
+            boolean validSplit = sourceCount == 1 && targetCount >= 2 && targetCount <= 5;
+            boolean validMerge = sourceCount >= 2 && sourceCount <= 5 && targetCount == 1;
+            if (totalPorts < 3 || totalPorts > 6 || (!validSplit && !validMerge)) {
+                continue;
+            }
             flowGraph.addVertex(junctionId);
         }
         for (JsonNode junction : chipDesign.get("junctions")) {
             String junctionId = junction.get("id").asText();
+            JsonNode sources = junction.get("sources");
+            JsonNode targets = junction.get("targets");
+            if (sources == null || !sources.isArray() || targets == null || !targets.isArray()) {
+                continue;
+            }
+            int sourceCount = sources.size();
+            int targetCount = targets.size();
+            int totalPorts = sourceCount + targetCount;
+            boolean validSplit = sourceCount == 1 && targetCount >= 2 && targetCount <= 5;
+            boolean validMerge = sourceCount >= 2 && sourceCount <= 5 && targetCount == 1;
+            if (totalPorts < 3 || totalPorts > 6 || (!validSplit && !validMerge)) {
+                continue;
+            }
 
-            if (junction.has("source")) {
-                String source = junction.get("source").asText();
-                String target1 = junction.get("target_1").asText();
-                String target2 = junction.get("target_2").asText();
-
-                if (!flowGraph.containsEdge(source, junctionId)) {
-                    flowGraph.addEdge(source, junctionId);
+            // v2: iterate sources[] and targets[] arrays
+            for (JsonNode s : sources) {
+                String src = s.asText();
+                if (!flowGraph.containsEdge(src, junctionId)) {
+                    flowGraph.addEdge(src, junctionId);
                 }
-                if (!flowGraph.containsEdge(junctionId, target1)) {
-                    flowGraph.addEdge(junctionId, target1);
-                }
-                if (!flowGraph.containsEdge(junctionId, target2)) {
-                    flowGraph.addEdge(junctionId, target2);
-                }
-            } else {
-                String source1 = junction.get("source_1").asText();
-                String source2 = junction.get("source_2").asText();
-                String target = junction.get("target").asText();
-
-                if (!flowGraph.containsEdge(source1, junctionId)) {
-                    flowGraph.addEdge(source1, junctionId);
-                }
-                if (!flowGraph.containsEdge(source2, junctionId)) {
-                    flowGraph.addEdge(source2, junctionId);
-                }
-                if (!flowGraph.containsEdge(junctionId, target)) {
-                    flowGraph.addEdge(junctionId, target);
+            }
+            for (JsonNode t : targets) {
+                String tgt = t.asText();
+                if (!flowGraph.containsEdge(junctionId, tgt)) {
+                    flowGraph.addEdge(junctionId, tgt);
                 }
             }
         }
@@ -662,14 +863,31 @@ public class MicrofluidicChipValidationService {
         List<String> sources = new ArrayList<>();
         List<String> targets = new ArrayList<>();
 
-        if (junction.has("source")) {
-            sources.add(junction.get("source").asText());
-            targets.add(junction.get("target_1").asText());
-            targets.add(junction.get("target_2").asText());
-        } else {
-            sources.add(junction.get("source_1").asText());
-            sources.add(junction.get("source_2").asText());
-            targets.add(junction.get("target").asText());
+        if (!junction.has("sources") || !junction.get("sources").isArray()
+                || !junction.has("targets") || !junction.get("targets").isArray()) {
+            problems.add("Junction " + junction.get("id").asText() +
+                    " must contain sources[] and targets[] arrays");
+            return true;
+        }
+
+        // v2: read from sources[] and targets[] arrays
+        for (JsonNode s : junction.get("sources")) {
+            sources.add(s.asText());
+        }
+        for (JsonNode t : junction.get("targets")) {
+            targets.add(t.asText());
+        }
+
+        int sourceCount = sources.size();
+        int targetCount = targets.size();
+        int totalPorts = sourceCount + targetCount;
+        boolean validSplit = sourceCount == 1 && targetCount >= 2 && targetCount <= 5;
+        boolean validMerge = sourceCount >= 2 && sourceCount <= 5 && targetCount == 1;
+
+        if (totalPorts < 3 || totalPorts > 6 || (!validSplit && !validMerge)) {
+            problems.add("Junction " + junction.get("id").asText() +
+                    " must be either a split (1 source, 2-5 targets) or a merge (2-5 sources, 1 target), with total ports between 3 and 6");
+            foundProblems = true;
         }
 
         for (String port : sources) {
@@ -741,16 +959,38 @@ public class MicrofluidicChipValidationService {
 
         switch (componentType) {
             case "mixers":
+                newComponent.put("type", "serpentine");
+                newComponent.put("num_turnings", 4);
+                newComponent.put("amplitude_um", 2000);
+                newComponent.put("distance_between_turnings_um", 200);
+                break;
             case "delays":
-                newComponent.put("num_turnings", 4); // Default value from schema
+                newComponent.put("type", "serpentine");
+                newComponent.put("num_turnings", 4);
+                newComponent.put("amplitude_um", 2000);
+                newComponent.put("distance_between_turnings_um", 200);
                 break;
             case "chambers":
-                ObjectNode dimensions = newComponent.putObject("dimensions");
-                dimensions.put("length", 4000); // Default value from schema
-                dimensions.put("width", 3200); // Default value from schema
+                newComponent.put("length_um", 4000);
+                newComponent.put("width_um", 3200);
                 break;
             case "filters":
-                newComponent.put("critical_particle_diameter", 10.0); // Default value from schema
+                newComponent.put("type", "pillar_matrix");
+                newComponent.put("length_um", 4000);
+                newComponent.put("width_um", 3200);
+                newComponent.put("post_shape", "circle");
+                newComponent.put("post_diameter_um", 200);
+                newComponent.put("columns", 6);
+                newComponent.put("rows", 7);
+                break;
+            case "droplets":
+                newComponent.put("type", "t_junction");
+                newComponent.put("nozzle_width_um", 100);
+                break;
+            case "tesla_valves":
+                newComponent.put("num_segment_pairs", 2);
+                newComponent.put("segment_length_um", 1000);
+                newComponent.put("segment_width_um", 600);
                 break;
             default:
                 return null;
@@ -1023,6 +1263,28 @@ public class MicrofluidicChipValidationService {
                 }
 
                 // Add the new edge
+                if (isJunction(bestSourceNode)) {
+                    int sourceIncoming = flowGraph.incomingEdgesOf(bestSourceNode).size();
+                    int sourceOutgoing = flowGraph.outgoingEdgesOf(bestSourceNode).size() + 1;
+                    int sourceTotalPorts = sourceIncoming + sourceOutgoing;
+                    boolean validSourceSplit = sourceIncoming == 1 && sourceOutgoing >= 2 && sourceOutgoing <= 5;
+                    boolean validSourceMerge = sourceIncoming >= 2 && sourceIncoming <= 5 && sourceOutgoing == 1;
+                    if (sourceTotalPorts < 3 || sourceTotalPorts > 6 || (!validSourceSplit && !validSourceMerge)) {
+                        continue;
+                    }
+                }
+
+                if (isJunction(bestTargetNode)) {
+                    int targetIncoming = flowGraph.incomingEdgesOf(bestTargetNode).size() + 1;
+                    int targetOutgoing = flowGraph.outgoingEdgesOf(bestTargetNode).size();
+                    int targetTotalPorts = targetIncoming + targetOutgoing;
+                    boolean validTargetSplit = targetIncoming == 1 && targetOutgoing >= 2 && targetOutgoing <= 5;
+                    boolean validTargetMerge = targetIncoming >= 2 && targetIncoming <= 5 && targetOutgoing == 1;
+                    if (targetTotalPorts < 3 || targetTotalPorts > 6 || (!validTargetSplit && !validTargetMerge)) {
+                        continue;
+                    }
+                }
+
                 flowGraph.addEdge(bestSourceNode, bestTargetNode);
                 hasChanges = true;
             }
@@ -1132,20 +1394,17 @@ public class MicrofluidicChipValidationService {
 
             ObjectNode updatedJunction = (ObjectNode) junction.deepCopy();
 
-            // Get existing sources and targets from JSON
+            // v2: Get existing sources and targets from JSON arrays
             List<String> sources = new ArrayList<>();
             List<String> targets = new ArrayList<>();
-
-            boolean hasSingleSource = junction.has("source");
-            if (hasSingleSource) {
-                sources.add(junction.get("source").asText());
-                targets.add(junction.get("target_1").asText());
-                targets.add(junction.get("target_2").asText());
-            } else {
-                sources.add(junction.get("source_1").asText());
-                sources.add(junction.get("source_2").asText());
-                targets.add(junction.get("target").asText());
+            JsonNode existingSources = junction.get("sources");
+            JsonNode existingTargets = junction.get("targets");
+            if (existingSources == null || !existingSources.isArray()
+                    || existingTargets == null || !existingTargets.isArray()) {
+                continue;
             }
+            for (JsonNode s : existingSources) sources.add(s.asText());
+            for (JsonNode t : existingTargets) targets.add(t.asText());
 
             // Get actual edges from the graph
             List<String> newSources = graph.incomingEdgesOf(junctionId).stream()
@@ -1156,33 +1415,58 @@ public class MicrofluidicChipValidationService {
                     .map(graph::getEdgeTarget)
                     .collect(Collectors.toList());
 
-            // Update sources without swapping unnecessarily
-            for (int i = 0; i < sources.size(); i++) {
-                String oldSource = sources.get(i);
-                if (!newSources.contains(oldSource)) { // Old source is gone
+            // v2: Rebuild sources[] and targets[] arrays from graph state
+            ArrayNode sourcesArr = objectMapper.createArrayNode();
+            ArrayNode targetsArr = objectMapper.createArrayNode();
+
+            // Preserve original order where possible, substitute removed entries
+            List<String> updatedSources = new ArrayList<>(sources);
+            for (int i = 0; i < updatedSources.size(); i++) {
+                if (!newSources.contains(updatedSources.get(i))) {
                     for (String candidate : newSources) {
-                        if (!sources.contains(candidate)) { // Ensure no swap
-                            updatedJunction.put(hasSingleSource ? "source" : "source_" + (i + 1), candidate);
-                            newSources.remove(candidate);
+                        if (!updatedSources.contains(candidate)) {
+                            updatedSources.set(i, candidate);
                             break;
                         }
                     }
                 }
+            }
+            // Add any brand-new sources not in original list
+            for (String ns : newSources) {
+                if (!updatedSources.contains(ns)) updatedSources.add(ns);
+            }
+            updatedSources.removeIf(s -> !newSources.contains(s));
+
+            List<String> updatedTargets = new ArrayList<>(targets);
+            for (int i = 0; i < updatedTargets.size(); i++) {
+                if (!newTargets.contains(updatedTargets.get(i))) {
+                    for (String candidate : newTargets) {
+                        if (!updatedTargets.contains(candidate)) {
+                            updatedTargets.set(i, candidate);
+                            break;
+                        }
+                    }
+                }
+            }
+            for (String nt : newTargets) {
+                if (!updatedTargets.contains(nt)) updatedTargets.add(nt);
+            }
+            updatedTargets.removeIf(t -> !newTargets.contains(t));
+
+            int sourceCount = updatedSources.size();
+            int targetCount = updatedTargets.size();
+            int totalPorts = sourceCount + targetCount;
+            boolean validSplit = sourceCount == 1 && targetCount >= 2 && targetCount <= 5;
+            boolean validMerge = sourceCount >= 2 && sourceCount <= 5 && targetCount == 1;
+            if (totalPorts < 3 || totalPorts > 6 || (!validSplit && !validMerge)) {
+                continue;
             }
 
-            // Update targets without unnecessary swaps
-            for (int i = 0; i < targets.size(); i++) {
-                String oldTarget = targets.get(i);
-                if (!newTargets.contains(oldTarget)) { // Old target is gone
-                    for (String candidate : newTargets) {
-                        if (!targets.contains(candidate)) { // Ensure no swap
-                            updatedJunction.put(hasSingleSource ? "target_" + (i + 1) : "target", candidate);
-                            newTargets.remove(candidate);
-                            break;
-                        }
-                    }
-                }
-            }
+            updatedSources.forEach(sourcesArr::add);
+            updatedTargets.forEach(targetsArr::add);
+
+            updatedJunction.set("sources", sourcesArr);
+            updatedJunction.set("targets", targetsArr);
 
             updatedJunctions.add(updatedJunction);
         }
@@ -1204,20 +1488,25 @@ public class MicrofluidicChipValidationService {
                 List<String> newSources = graph.incomingEdgesOf(vertex).stream()
                         .map(graph::getEdgeSource)
                         .collect(Collectors.toList());
-
                 List<String> newTargets = graph.outgoingEdgesOf(vertex).stream()
                         .map(graph::getEdgeTarget)
                         .collect(Collectors.toList());
-
-                if (newSources.size() == 1 && newTargets.size() == 2) {
-                    newJunction.put("source", newSources.get(0));
-                    newJunction.put("target_1", newTargets.get(0));
-                    newJunction.put("target_2", newTargets.get(1));
-                } else if (newSources.size() == 2 && newTargets.size() == 1) {
-                    newJunction.put("source_1", newSources.get(0));
-                    newJunction.put("source_2", newSources.get(1));
-                    newJunction.put("target", newTargets.get(0));
+                int sourceCount = newSources.size();
+                int targetCount = newTargets.size();
+                int totalPorts = sourceCount + targetCount;
+                boolean validSplit = sourceCount == 1 && targetCount >= 2 && targetCount <= 5;
+                boolean validMerge = sourceCount >= 2 && sourceCount <= 5 && targetCount == 1;
+                if (totalPorts < 3 || totalPorts > 6 || (!validSplit && !validMerge)) {
+                    continue;
                 }
+
+                // v2: build sources[] and targets[] arrays
+                ArrayNode sourcesArr = objectMapper.createArrayNode();
+                ArrayNode targetsArr = objectMapper.createArrayNode();
+                newSources.forEach(sourcesArr::add);
+                newTargets.forEach(targetsArr::add);
+                newJunction.set("sources", sourcesArr);
+                newJunction.set("targets", targetsArr);
 
                 updatedJunctions.add(newJunction);
             }
@@ -1267,13 +1556,16 @@ public class MicrofluidicChipValidationService {
             String oldId = updatedJunction.get("id").asText();
             updatedJunction.put("id", renameMap.get(oldId));
 
-            // Update references inside each junction
-            for (String key : Arrays.asList("source", "source_1", "source_2", "target", "target_1", "target_2")) {
+            // v2: Update references inside sources[] and targets[] arrays
+            for (String key : Arrays.asList("sources", "targets")) {
                 if (updatedJunction.has(key)) {
-                    String ref = updatedJunction.get(key).asText();
-                    if (renameMap.containsKey(ref)) {
-                        updatedJunction.put(key, renameMap.get(ref));
+                    ArrayNode arr = (ArrayNode) updatedJunction.get(key);
+                    ArrayNode updatedArr = objectMapper.createArrayNode();
+                    for (JsonNode item : arr) {
+                        String ref = item.asText();
+                        updatedArr.add(renameMap.getOrDefault(ref, ref));
                     }
+                    updatedJunction.set(key, updatedArr);
                 }
             }
             updatedJunctions.add(updatedJunction);

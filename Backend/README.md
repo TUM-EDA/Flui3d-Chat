@@ -63,8 +63,8 @@ server.port=8090
 ollama.api.url=http://127.0.0.1:11434
 
 # Names of the LLMs hosted in Ollama
-ollama.modelname.baseline=microfluidic_llama_3
-ollama.modelname.reasoning=microfluidic_qwen3_reasoning
+ollama.modelname.baseline=flui3d_chat
+ollama.modelname.reasoning=flui3d_chat_reasoning
 
 # Allowed origins for Cross-Origin Resource Sharing (CORS)
 # Should match the URL of the running frontend application

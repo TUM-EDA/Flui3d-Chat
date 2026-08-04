@@ -6,6 +6,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -23,6 +24,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fluidllm.fluidllm_backend.service.MicrofluidicChipValidationService;
 import com.fluidllm.fluidllm_backend.service.MicrofluidicChipValidationService.ValidationResponse;
 import com.fluidllm.fluidllm_backend.service.MicrofluidicChipSynthesisService;
+import com.fluidllm.fluidllm_backend.service.MicrofluidicChipSynthesisService.ComsolPackageResponse;
+import com.fluidllm.fluidllm_backend.service.MicrofluidicChipSynthesisService.ComsolResponse;
 import com.fluidllm.fluidllm_backend.service.MicrofluidicChipSynthesisService.SynthesisResponse;
 
 @RestController
@@ -86,10 +89,8 @@ public class FluidllmBackendController {
                     "model", ollamaReasoningModelname,
                     "stream", true,
                     "messages", messages,
-                    "format", "grammar:" + microfluidcReasoningGrammar,
+                    "think", true,
                     "options", Map.of(
-                            "temperature", 0.4,
-                            "min_p", 1.0,
                             "num_ctx", 32768));
 
         } else {
@@ -99,11 +100,8 @@ public class FluidllmBackendController {
                     "model", ollamaBaselineModelname,
                     "stream", true,
                     "messages", messages,
-                    "format", microfluidicJsonSchema,
-                    "options", Map.of(
-                            "temperature", 1.5,
-                            "min_p", 1.0,
-                            "num_ctx", 32768));
+                    "think", false);
+
         }
 
         // Make non-blocking WebClient request
@@ -153,6 +151,47 @@ public class FluidllmBackendController {
                 .onErrorResume(e -> Mono.error(new RuntimeException("Failed to synthesize chip", e)));
     }
 
+    /**
+     * Generates standalone COMSOL Java source for a synthesized chip. The physical
+     * layout is solved from the same conceptual chip design and settings used by
+     * /synthesize, but the source is generated only when explicitly requested.
+     */
+    @PostMapping(value = "/comsol", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public Mono<ResponseEntity<ComsolResponse>> generateComsolJava(
+            @RequestBody ComsolGenerationRequest request) {
+        return synthesisService.generateComsolJava(
+                        request.getChipDesign(),
+                        request.getSettings(),
+                        request.getDimension(),
+                        request.getClassName())
+                .map(response -> ResponseEntity.ok(response))
+                .onErrorResume(e -> Mono.error(new RuntimeException("Failed to generate COMSOL Java", e)));
+    }
+
+    /**
+     * 20260624 Generates a downloadable COMSOL package containing the Java source and a
+     * README with basic usage instructions.
+     */
+    @PostMapping(value = "/comsol/package", consumes = MediaType.APPLICATION_JSON_VALUE, produces = "application/zip")
+    public Mono<ResponseEntity<byte[]>> generateComsolPackage(
+            @RequestBody ComsolGenerationRequest request) {
+        return synthesisService.generateComsolPackage(
+                        request.getChipDesign(),
+                        request.getSettings(),
+                        request.getDimension(),
+                        request.getClassName())
+                .map(this::comsolPackageResponse)
+                .onErrorResume(e -> Mono.error(new RuntimeException("Failed to generate COMSOL package", e)));
+    }
+
+    private ResponseEntity<byte[]> comsolPackageResponse(ComsolPackageResponse response) {
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType("application/zip"))
+                .header(HttpHeaders.CONTENT_DISPOSITION,
+                        "attachment; filename=\"" + response.getZipFileName() + "\"")
+                .body(response.getZipBytes());
+    }
+
 }
 
 class ChipDesignValidationRequest {
@@ -163,8 +202,16 @@ class ChipDesignValidationRequest {
         return chipDesign;
     }
 
+    public void setChipDesign(JsonNode chipDesign) {
+        this.chipDesign = chipDesign;
+    }
+
     public boolean isFixJunctions() {
         return fixJunctions;
+    }
+
+    public void setFixJunctions(boolean fixJunctions) {
+        this.fixJunctions = fixJunctions;
     }
 
 }
@@ -177,8 +224,56 @@ class ChipDesignSettingsRequest {
         return chipDesign;
     }
 
+    public void setChipDesign(JsonNode chipDesign) {
+        this.chipDesign = chipDesign;
+    }
+
     public JsonNode getSettings() {
         return settings;
+    }
+
+    public void setSettings(JsonNode settings) {
+        this.settings = settings;
+    }
+
+}
+
+class ComsolGenerationRequest {
+    private JsonNode chipDesign;
+    private JsonNode settings;
+    private String dimension;
+    private String className;
+
+    public JsonNode getChipDesign() {
+        return chipDesign;
+    }
+
+    public void setChipDesign(JsonNode chipDesign) {
+        this.chipDesign = chipDesign;
+    }
+
+    public JsonNode getSettings() {
+        return settings;
+    }
+
+    public void setSettings(JsonNode settings) {
+        this.settings = settings;
+    }
+
+    public String getDimension() {
+        return dimension;
+    }
+
+    public void setDimension(String dimension) {
+        this.dimension = dimension;
+    }
+
+    public String getClassName() {
+        return className;
+    }
+
+    public void setClassName(String className) {
+        this.className = className;
     }
 
 }
