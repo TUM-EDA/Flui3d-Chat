@@ -65,7 +65,8 @@ public class MicrofluidicChipSynthesisService {
             String chipSvg = chip.drawSVG(1).getSVGElement(null, false,
                     new ViewBox(0, 0, chip.getWidth(), chip.getLength()), null, null);
             String chipJson = objectMapper.writeValueAsString(chip.generatePhysicalChip());
-            return new SolvedChipView(chip, chipSvg, chipJson);
+            String flui3dJson = objectMapper.writeValueAsString(new com.flui3d.Chip(chip));
+            return new SolvedChipView(chip, chipSvg, chipJson, flui3dJson);
         })
                 /*
                 .flatMap(view -> {
@@ -87,7 +88,7 @@ public class MicrofluidicChipSynthesisService {
                 })
                 */
                 // STL is generated in the frontend from chipJson using OCCT.
-                .map(view -> new SynthesisResponse(view.svg(), null, view.chipJson()));
+                .map(view -> new SynthesisResponse(view.svg(), null, view.chipJson(), view.flui3dJson()));
     }
 
     public Mono<ComsolResponse> generateComsolJava(
@@ -270,13 +271,14 @@ public class MicrofluidicChipSynthesisService {
         chip.setDefaultConnectionWidth(settings.get("channelWidth").asInt());
         chip.setDefaultConnectionMargin(settings.get("channelMargin").asInt());
         chip.setLayerHeight(settings.get("layerHeight").asInt());
+        chip.setNumLayers(1);
         double objectiveWidthWeight = doubleValue(settings, "objectiveWidthWeight", 0.3);
         objectiveWidthWeight = Math.max(0.1, Math.min(0.9, objectiveWidthWeight));
         chip.setObjectiveWidthWeight(objectiveWidthWeight);
 
         createComponents(chipDesign, settings, chip, components);
         createJunctions(chipDesign, settings, components, junctions, chip);
-        createConnections(chipDesign, components, junctions, chip);
+        createConnections(chipDesign, settings, components, junctions, chip);
 
         chip.initialize();
         chip.solve(120, mipGap, mipFocus, 0.6);
@@ -491,13 +493,6 @@ public class MicrofluidicChipSynthesisService {
         int portGap = angle == 90 && inputCount > 2
                 ? Math.max(channelMargin, settingInt(settings, "moduleMargin", 400))
                 : channelMargin;
-        int jointLength = channelMargin * 2 + channelWidth * 2;
-        int jointWidth = angle == 90 ? jointLength : (int) (jointLength * Math.cos(Math.toRadians(angle)));
-        if (angle == 90 && inputCount > 2) {
-            jointWidth = 2 * channelMargin + inputCount * portDiameter + (inputCount - 1) * portGap;
-            jointLength = 2 * channelMargin + portDiameter + channelWidth * 8;
-        }
-
         Joint joint = Joint.builder()
                 .name(name)
                 .angle(angle)
@@ -507,16 +502,28 @@ public class MicrofluidicChipSynthesisService {
                 .inputCount(inputCount)
                 .portDiameter(portDiameter)
                 .portGap(portGap)
-                .width(jointWidth)
-                .length(jointLength)
                 .build();
+        initializeJointDimensions(joint, angle, channelWidth, channelMargin, inputCount);
 
         components.put(name, joint);
         chip.addModule(joint);
     }
 
-    private void createConnections(JsonNode chipDefinition, Map<String, Object> components,
-            Map<String, JsonNode> junctions, Chip chip) {
+    private void initializeJointDimensions(Joint joint, int angle, int channelWidth, int channelMargin, int inputCount) {
+        joint.setMargin(channelMargin);
+        if (angle == 90 && inputCount > 2) {
+            joint.setWidth(joint.calculateTJointWidth());
+            joint.setLength(joint.calculateTJointLength());
+            return;
+        }
+
+        int length = channelMargin * 2 + channelWidth * 2;
+        joint.setLength(length);
+        joint.setWidth(angle == 90 ? length : (int) (length * Math.cos(Math.toRadians(angle))));
+    }
+
+    private void createConnections(JsonNode chipDefinition, JsonNode settings,
+            Map<String, Object> components, Map<String, JsonNode> junctions, Chip chip) {
 
         Set<Connection> connections = new HashSet<>();
         Set<String> sourceComponents = new HashSet<>();
@@ -539,13 +546,13 @@ public class MicrofluidicChipSynthesisService {
             }
         }
 
-        addAutomaticDropletContinuousInputs(chipDefinition, components, chip, connections);
+        addAutomaticDropletContinuousInputs(chipDefinition, settings, components, chip, connections);
 
         chip.addConnection(connections.toArray(new Connection[0]));
     }
 
-    private void addAutomaticDropletContinuousInputs(JsonNode chipDefinition, Map<String, Object> components,
-            Chip chip, Set<Connection> connections) {
+    private void addAutomaticDropletContinuousInputs(JsonNode chipDefinition, JsonNode settings,
+            Map<String, Object> components, Chip chip, Set<Connection> connections) {
 
         Map<String, Set<String>> dropletInputPins = collectDropletInputPins(chipDefinition);
 
@@ -562,7 +569,7 @@ public class MicrofluidicChipSynthesisService {
             }
 
             String autoPortId = uniqueAutoPortId(components, "inlet_cp");
-            Port autoPort = new Port(autoPortId, chip.getDefaultConnectionWidth() * 2);
+            Port autoPort = new Port(autoPortId, settingInt(settings, "portDiameter", 400));
             components.put(autoPortId, autoPort);
             chip.addModule(autoPort);
             connections.add(new Connection(autoPort.getPortPin(), droplet.getContinuousInputPin()));
@@ -572,7 +579,7 @@ public class MicrofluidicChipSynthesisService {
             }
 
             String secondAutoPortId = uniqueAutoPortId(components, "inlet_cp");
-            Port secondAutoPort = new Port(secondAutoPortId, chip.getDefaultConnectionWidth() * 2);
+            Port secondAutoPort = new Port(secondAutoPortId, settingInt(settings, "portDiameter", 400));
             components.put(secondAutoPortId, secondAutoPort);
             chip.addModule(secondAutoPort);
             connections.add(new Connection(secondAutoPort.getPortPin(), droplet.getSecondContinuousInputPin()));
@@ -797,10 +804,17 @@ public class MicrofluidicChipSynthesisService {
                 case "continuous" -> ((DropletGenerator) component).getContinuousInputPin();
                 default -> throw new IllegalArgumentException("Invalid pin for DropletGenerator: " + pinName);
             };
-        } else if (component instanceof Joint) {
+        } else if (component instanceof Joint joint) {
             if (pinName.matches("pin\\d+")) {
                 int inputIndex = Integer.parseInt(pinName.substring(3)) - 1;
-                return ((Joint) component).getInputPin(inputIndex);
+                if (joint.getInputCount() <= 2) {
+                    return switch (inputIndex) {
+                        case 0 -> joint.getInput1Pin();
+                        case 1 -> joint.getInput2Pin();
+                        default -> throw new IllegalArgumentException("Invalid input pin for 2-port Junction: " + pinName);
+                    };
+                }
+                return joint.getInputPin(inputIndex);
             }
             throw new IllegalArgumentException("Invalid pin for Junction: " + pinName);
         }
@@ -847,7 +861,7 @@ public class MicrofluidicChipSynthesisService {
         return node != null && node.hasNonNull(fieldName) ? node.get(fieldName).asText() : defaultValue;
     }
 
-    private record SolvedChipView(Chip chip, String svg, String chipJson) {
+    private record SolvedChipView(Chip chip, String svg, String chipJson, String flui3dJson) {
     }
 
     // Helper class for synthesis response
@@ -855,11 +869,13 @@ public class MicrofluidicChipSynthesisService {
         private final String svg;
         private final String stlBase64; // optional, may be null if timeout occurs
         private final String chipJson;
+        private final String flui3dJson;
 
-        public SynthesisResponse(String svg, String stlBase64, String chipJson) {
+        public SynthesisResponse(String svg, String stlBase64, String chipJson, String flui3dJson) {
             this.svg = svg;
             this.stlBase64 = stlBase64;
             this.chipJson = chipJson;
+            this.flui3dJson = flui3dJson;
         }
 
         public String getSvg() {
@@ -872,6 +888,10 @@ public class MicrofluidicChipSynthesisService {
 
         public String getChipJson() {
             return chipJson;
+        }
+
+        public String getFlui3dJson() {
+            return flui3dJson;
         }
     }
 
