@@ -105,6 +105,19 @@
 
             <!-- Settings Button -->
             <div class="flex w-full h-full justify-end">
+              <div
+                class="tooltip tooltip-neutral tooltip-bottom"
+                data-tip="Synthesis tip"
+              >
+                <button
+                  class="btn btn-ghost text-base-content hover:text-warning"
+                  aria-label="Open synthesis tip"
+                  @click="openRoutingTip"
+                >
+                  <font-awesome-icon icon="fa-solid fa-circle-question" size="lg" />
+                </button>
+              </div>
+
               <div class="dropdown dropdown-bottom dropdown-end">
                 <div class="tooltip tooltip-neutral tooltip-bottom" data-tip="Settings">
                   <label tabindex="0" class="btn btn-ghost text-base-content hover:text-cyan-400"
@@ -165,6 +178,54 @@
                   <font-awesome-icon icon="fa-solid fa-rotate-left" size="lg" />
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+
+        <div
+          ref="routingTipCard"
+          class="routing-tip-card routing-tip-hidden fixed top-20 right-[10%] z-50 w-[min(24rem,calc(100vw-2rem))] rounded-lg bg-base-100 text-base-content shadow-xl border border-base-300 p-4 text-left"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <h4 class="font-bold text-sm">Synthesis tip</h4>
+            <button
+              class="btn btn-xs btn-ghost"
+              aria-label="Close synthesis tip"
+              @click="closeRoutingTip"
+            >
+              x
+            </button>
+          </div>
+
+          <p class="text-xs mt-2 leading-relaxed">
+            Disconnected layout? Click<font-awesome-icon icon="fa-solid fa-gear" class="mx-1" />, increase Module Margin
+            (e.g., to 1000 or even larger), adjust Chip Ratio slighty left or right if needed, then click
+            <span class="inline-flex items-center rounded-full bg-[#B685D2] px-1.5 py-[1px] text-[11px] font-semibold leading-tight text-white">
+              Save & Resynthesize
+            </span>
+            .
+          </p>
+
+          <div class="grid grid-cols-[1fr_auto_1fr] items-center gap-2 mt-3">
+            <div>
+              <img
+                :src="routingDisconnectedImage"
+                alt="Example of disconnected routing"
+                class="w-full aspect-video object-cover rounded border border-base-300 bg-neutral"
+              />
+              <p class="text-[11px] opacity-70 mt-1">Disconnected</p>
+            </div>
+            <font-awesome-icon
+              icon="fa-solid fa-arrow-right"
+              class="text-base-content opacity-60"
+            />
+            <div>
+              <img
+                :src="routingConnectedImage"
+                alt="Example of connected routing"
+                class="w-full aspect-video object-cover rounded border border-base-300 bg-neutral"
+              />
+              <p class="text-[11px] opacity-70 mt-1">Connected</p>
             </div>
           </div>
         </div>
@@ -376,12 +437,60 @@
                 </div>
 
                 <!-- SVG Display -->
-                <div v-else class="w-full h-full flex items-center justify-center">
+                <div
+                  v-else
+                  class="relative w-full h-full flex items-center justify-center"
+                >
                   <svg
                     v-if="selectedMessagePair.assistant.chipSvg"
                     v-html="selectedMessagePair.assistant.chipSvg"
                     class="w-full h-full"
                   ></svg>
+
+                  <!-- Preview-only inlet flow arrows. These are intentionally kept
+                       outside chipSvg so they are not included in SVG downloads. -->
+                  <svg
+                    v-if="inletFlowOverlay"
+                    class="absolute inset-0 w-full h-full pointer-events-none"
+                    :viewBox="inletFlowOverlay.viewBox"
+                    preserveAspectRatio="xMidYMid meet"
+                    aria-hidden="true"
+                  >
+                    <defs>
+                      <marker
+                        id="preview-inlet-arrowhead"
+                        markerWidth="4"
+                        markerHeight="4"
+                        refX="3.4"
+                        refY="2"
+                        orient="auto"
+                      >
+                        <path d="M 0 0 L 4 2 L 0 4 Z" fill="black" />
+                      </marker>
+                      <marker
+                        id="preview-outlet-arrowhead"
+                        markerWidth="4"
+                        markerHeight="4"
+                        refX="3.4"
+                        refY="2"
+                        orient="auto"
+                      >
+                        <path d="M 0 0 L 4 2 L 0 4 Z" fill="white" />
+                      </marker>
+                    </defs>
+                    <line
+                      v-for="arrow in inletFlowOverlay.arrows"
+                      :key="arrow.id"
+                      :x1="arrow.x1"
+                      :y1="arrow.y1"
+                      :x2="arrow.x2"
+                      :y2="arrow.y2"
+                      :stroke-width="arrow.strokeWidth"
+                      :stroke="arrow.color"
+                      stroke-linecap="round"
+                      :marker-end="`url(#preview-${arrow.kind}-arrowhead)`"
+                    />
+                  </svg>
 
                   <!-- SVG / STL Download Button in top-right corner -->
                   <div
@@ -510,8 +619,26 @@
                           }}
                         </a>
                       </li>
+                      <li
+                        :class="{
+                          'tooltip tooltip-bottom tooltip-error':
+                            !selectedMessagePair.assistant.flui3dJson,
+                        }"
+                        data-tip="Flui3D JSON not available"
+                      >
+                        <a
+                          @click="downloadFlui3DJson"
+                          :class="{
+                            'pointer-events-none opacity-50 cursor-not-allowed':
+                              !selectedMessagePair.assistant.flui3dJson,
+                          }"
+                        >
+                          Download Flui3d Design (JSON)
+                        </a>
+                      </li>
                     </ul>
                   </div>
+
                 </div>
 
                 <!-- Progress Bar -->
@@ -800,6 +927,7 @@ interface UserMessage extends BaseMessage {
   chipSvg?: never
   stlBase64?: never
   chipJson?: never
+  flui3dJson?: never
   synthesisError?: never
   activePanel?: never
 }
@@ -816,6 +944,7 @@ interface AssistantMessage extends BaseMessage {
   chipSvg?: string
   stlBase64?: string
   chipJson?: string
+  flui3dJson?: string
   synthesisError?: string
   activePanel: 'code' | 'svg'
 }
@@ -829,6 +958,17 @@ interface SettingConfig {
   max?: number
   step?: number
   type?: 'range'
+}
+
+interface InletFlowArrow {
+  id: string
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+  strokeWidth: number
+  kind: 'inlet' | 'outlet'
+  color: 'black' | 'white'
 }
 
 export default {
@@ -845,9 +985,12 @@ export default {
     const reasoningEnabled = ref(false)
     const toast = useToast()
     const chatContainer = useTemplateRef('chatContainer')
+    const routingTipCard = useTemplateRef('routingTipCard')
     const selectedMessagePairId = ref<number>(0)
     const selectedView = ref<number>(0)
     const currentTime = ref(Date.now())
+    const routingDisconnectedImage = '/routing-disconnected.png'
+    const routingConnectedImage = '/routing-connected.png'
     const settings = ref<Record<string, SettingConfig>>({
       chipMargin: { label: 'Chip Margin', value: 600 },
       height: { label: '3D Chip Thickness', value: 3000 },
@@ -859,7 +1002,7 @@ export default {
       maxRetries: { label: 'Maximum Retry Attempts', value: 3 },
       objectiveWidthWeight: {
         label: 'Chip Ratio (Optim. Goal)',
-        value: 0.1,
+        value: 0.3,
         min: 0.1,
         max: 0.9,
         step: 0.1,
@@ -881,6 +1024,8 @@ export default {
     let elapsedTime = 1
     let abortController: AbortController | null = null
     let intervalId: number | null = null
+    let routingTipAutoTimeoutId: number | null = null
+    let hasAutoShownRoutingTip = false
 
     onUnmounted(() => {
       if (abortController) {
@@ -890,7 +1035,57 @@ export default {
       if (intervalId) {
         clearInterval(intervalId)
       }
+
+      if (routingTipAutoTimeoutId) {
+        clearTimeout(routingTipAutoTimeoutId)
+      }
     })
+
+    const closeRoutingTip = () => {
+      if (routingTipAutoTimeoutId) {
+        clearTimeout(routingTipAutoTimeoutId)
+        routingTipAutoTimeoutId = null
+      }
+      if (routingTipCard.value instanceof HTMLElement) {
+        routingTipCard.value.classList.remove('routing-tip-visible')
+        routingTipCard.value.classList.add('routing-tip-hidden')
+      }
+    }
+
+    const openRoutingTip = () => {
+      if (routingTipCard.value instanceof HTMLElement) {
+        routingTipCard.value.classList.remove('routing-tip-hidden')
+        routingTipCard.value.classList.add('routing-tip-visible')
+      }
+    }
+
+    const chipDesignHasContent = (chipDesign: unknown) => {
+      if (!chipDesign || typeof chipDesign !== 'object') return false
+
+      const design = chipDesign as {
+        connections?: unknown
+        component_params?: Record<string, unknown>
+      }
+
+      const hasConnections = Array.isArray(design.connections) && design.connections.length > 0
+      const hasComponents =
+        design.component_params &&
+        Object.values(design.component_params).some(
+          (components) => Array.isArray(components) && components.length > 0,
+        )
+
+      return hasConnections || Boolean(hasComponents)
+    }
+
+    const scheduleRoutingTipOnce = () => {
+      if (hasAutoShownRoutingTip || routingTipAutoTimeoutId) return
+
+      hasAutoShownRoutingTip = true
+      routingTipAutoTimeoutId = window.setTimeout(() => {
+        routingTipAutoTimeoutId = null
+        openRoutingTip()
+      }, 2000)
+    }
 
     const optimizationProgress = computed(() => {
       return (
@@ -980,6 +1175,301 @@ export default {
       }
 
       return null
+    })
+
+    const inletFlowOverlay = computed(() => {
+      const assistant = selectedMessagePair.value?.assistant
+      if (!assistant?.chipSvg) return null
+
+      try {
+        const svgDocument = new DOMParser().parseFromString(assistant.chipSvg, 'image/svg+xml')
+        if (svgDocument.querySelector('parsererror')) return null
+
+        const svgRoot = svgDocument.documentElement
+        const viewBox = svgRoot.getAttribute('viewBox')
+        if (!viewBox) return null
+        const viewBoxValues = viewBox.trim().split(/[\s,]+/).map(Number)
+        if (viewBoxValues.length !== 4 || viewBoxValues.some((value) => !Number.isFinite(value))) {
+          return null
+        }
+
+        const svgNamespace = 'http://www.w3.org/2000/svg'
+        const parseTransform = (transform: string | null) => {
+          if (!transform) return new DOMMatrix()
+
+          const transformParser = document.createElementNS(svgNamespace, 'g')
+          transformParser.setAttribute('transform', transform)
+          const consolidatedTransform = transformParser.transform.baseVal.consolidate()
+          if (!consolidatedTransform) return new DOMMatrix()
+
+          const matrix = consolidatedTransform.matrix
+          return new DOMMatrix([matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f])
+        }
+        const transformToSvgRoot = (element: Element) => {
+          let matrix = new DOMMatrix()
+          let current: Element | null = element
+
+          while (current) {
+            matrix = parseTransform(current.getAttribute('transform')).multiply(matrix)
+            if (current === svgRoot) break
+            current = current.parentElement
+          }
+
+          return matrix
+        }
+        const transformPoint = (matrix: DOMMatrix, x: number, y: number) =>
+          new DOMPoint(x, y).matrixTransform(matrix)
+        const transformScale = (matrix: DOMMatrix) =>
+          Math.max(Math.hypot(matrix.a, matrix.b), Math.hypot(matrix.c, matrix.d))
+
+        const ellipses = Array.from(svgRoot.querySelectorAll('ellipse'))
+          .map((ellipse) => {
+            const cx = Number(ellipse.getAttribute('cx'))
+            const cy = Number(ellipse.getAttribute('cy'))
+            const rx = Number(ellipse.getAttribute('rx'))
+            const ry = Number(ellipse.getAttribute('ry'))
+            const matrix = transformToSvgRoot(ellipse)
+            const center = transformPoint(matrix, cx, cy)
+            const radiusXPoint = transformPoint(matrix, cx + rx, cy)
+            const radiusYPoint = transformPoint(matrix, cx, cy + ry)
+
+            return {
+              cx: center.x,
+              cy: center.y,
+              rx: Math.hypot(radiusXPoint.x - center.x, radiusXPoint.y - center.y),
+              ry: Math.hypot(radiusYPoint.x - center.x, radiusYPoint.y - center.y),
+            }
+          })
+          .filter(
+            (ellipse) =>
+              Number.isFinite(ellipse.cx) &&
+              Number.isFinite(ellipse.cy) &&
+              Number.isFinite(ellipse.rx) &&
+              Number.isFinite(ellipse.ry),
+          )
+
+        const drawingStyle = (element: Element) => {
+          const ownStyle = element.getAttribute('style') ?? ''
+          const parentStyle = element.parentElement?.getAttribute('style') ?? ''
+          return `${ownStyle};${parentStyle}`
+        }
+        const isChannelGeometry = (element: Element) => {
+          const style = drawingStyle(element)
+          const hasVisibleStroke =
+            /stroke\s*:/i.test(style) && !/stroke\s*:\s*none/i.test(style)
+          if (!hasVisibleStroke) return false
+          // JFreeSVG emits routed channels as unfilled paths. Filled/stroked paths
+          // can be module outlines and must not be used to infer flow direction.
+          return element.tagName.toLowerCase() !== 'path' || /fill\s*:\s*none/i.test(style)
+        }
+        const channelWidthOf = (element: Element) => {
+          const match = drawingStyle(element).match(/stroke-width\s*:\s*([\d.]+)/i)
+          const width = Number(match?.[1])
+          return Number.isFinite(width) && width > 0 ? width : 100
+        }
+
+        // Keep paths and lines in their original SVG drawing order. Component
+        // renderers often emit a curve followed by a short straight port segment;
+        // collecting every path before every line can select the curve's tangent.
+        const pathData = Array.from(svgRoot.querySelectorAll('path, line'))
+          .filter(isChannelGeometry)
+          .flatMap((element) => {
+            const isLine = element.tagName.toLowerCase() === 'line'
+            const data = isLine
+              ? `M ${element.getAttribute('x1')} ${element.getAttribute('y1')} L ${element.getAttribute('x2')} ${element.getAttribute('y2')}`
+              : element.getAttribute('d')
+            if (!data) return []
+
+            const matrix = transformToSvgRoot(element)
+            return [
+              {
+                data,
+                matrix,
+                isLine,
+                channelWidth: channelWidthOf(element) * transformScale(matrix),
+              },
+            ]
+          })
+
+        const paths = pathData.flatMap(({ data, matrix, isLine, channelWidth }) => {
+          const path = document.createElementNS(svgNamespace, 'path')
+          path.setAttribute('d', data)
+          try {
+            const length = path.getTotalLength()
+            return Number.isFinite(length) && length > 0
+              ? [{ path, length, matrix, isLine, channelWidth }]
+              : []
+          } catch {
+            return []
+          }
+        })
+
+        const pointOnPath = (path: (typeof paths)[number], distance: number) => {
+          const point = path.path.getPointAtLength(distance)
+          return transformPoint(path.matrix, point.x, point.y)
+        }
+
+        const nearestPort = (label: Element) => {
+          const labelX = Number(label.getAttribute('x'))
+          const labelY = Number(label.getAttribute('y'))
+          if (!Number.isFinite(labelX) || !Number.isFinite(labelY)) return null
+          const labelPoint = transformPoint(transformToSvgRoot(label), labelX, labelY)
+          return ellipses.reduce<(typeof ellipses)[number] | null>((nearest, ellipse) => {
+            const distance = Math.hypot(ellipse.cx - labelPoint.x, ellipse.cy - labelPoint.y)
+            if (!nearest) return ellipse
+            const nearestDistance = Math.hypot(
+              nearest.cx - labelPoint.x,
+              nearest.cy - labelPoint.y,
+            )
+            return distance < nearestDistance ? ellipse : nearest
+          }, null)
+        }
+
+        const pathAtPort = (port: (typeof ellipses)[number]) => {
+          let match:
+            | ((typeof paths)[number] & {
+                portAtStart: boolean
+                endpointDistance: number
+              })
+            | null = null
+          for (const candidate of paths) {
+            const start = pointOnPath(candidate, 0)
+            const end = pointOnPath(candidate, candidate.length)
+            const startDistance = Math.hypot(start.x - port.cx, start.y - port.cy)
+            const endDistance = Math.hypot(end.x - port.cx, end.y - port.cy)
+            const portAtStart = startDistance <= endDistance
+            const endpointDistance = portAtStart ? startDistance : endDistance
+            const tolerance = Math.max(1, Math.max(port.rx, port.ry) * 0.02)
+            if (endpointDistance > tolerance) continue
+            const sameEndpoint =
+              match &&
+              Math.abs(endpointDistance - match.endpointDistance) <=
+                Math.max(0.001, tolerance * 0.05)
+            if (
+              !match ||
+              endpointDistance < match.endpointDistance - 0.001 ||
+              sameEndpoint
+            ) {
+              // Equal endpoints are common where a routed connection meets a
+              // component's final port segment. Prefer the later SVG primitive,
+              // which is the segment rendered directly against the port.
+              match = { ...candidate, portAtStart, endpointDistance }
+            }
+          }
+          return match
+        }
+
+        const arrowAlongChannel = (
+          match: NonNullable<ReturnType<typeof pathAtPort>>,
+          port: (typeof ellipses)[number],
+          arrowLength: number,
+          towardPort: boolean,
+        ) => {
+          const portRadius = Math.max(port.rx, port.ry)
+          const centerOffset = Math.min(
+            portRadius + match.channelWidth * 0.75,
+            match.length * 0.4,
+          )
+          const centerPathDistance = match.portAtStart
+            ? centerOffset
+            : match.length - centerOffset
+          const tangentSampleDistance = Math.min(
+            Math.max(2, match.channelWidth * 0.08),
+            match.length * 0.05,
+          )
+          const beforeTangent = pointOnPath(
+            match,
+            Math.max(0, centerPathDistance - tangentSampleDistance),
+          )
+          const afterTangent = pointOnPath(
+            match,
+            Math.min(match.length, centerPathDistance + tangentSampleDistance),
+          )
+          const center = pointOnPath(match, centerPathDistance)
+          const inwardSign = match.portAtStart ? 1 : -1
+          let dx = (afterTangent.x - beforeTangent.x) * inwardSign
+          let dy = (afterTangent.y - beforeTangent.y) * inwardSign
+          const tangentLength = Math.hypot(dx, dy)
+          if (tangentLength === 0) return null
+          dx /= tangentLength
+          dy /= tangentLength
+
+          if (towardPort) {
+            dx *= -1
+            dy *= -1
+          }
+          return {
+            from: {
+              x: center.x - (dx * arrowLength) / 2,
+              y: center.y - (dy * arrowLength) / 2,
+            },
+            to: {
+              x: center.x + (dx * arrowLength) / 2,
+              y: center.y + (dy * arrowLength) / 2,
+            },
+          }
+        }
+
+        const arrows: InletFlowArrow[] = []
+        const inletLabels = Array.from(svgRoot.querySelectorAll('text')).filter((textElement) =>
+          /^inlet(?:_|\b)/i.test(textElement.textContent?.trim() ?? ''),
+        )
+
+        for (const [index, label] of inletLabels.entries()) {
+          const port = nearestPort(label)
+          if (!port) continue
+          const pathMatch = pathAtPort(port)
+          if (!pathMatch) continue
+
+          const channelWidth = pathMatch.channelWidth
+          const arrowLength = channelWidth * 0.9
+          const points = arrowAlongChannel(pathMatch, port, arrowLength, false)
+          if (!points) continue
+
+          arrows.push({
+            id: `${label.textContent?.trim() ?? 'inlet'}-${index}`,
+            x1: points.from.x,
+            y1: points.from.y,
+            x2: points.to.x,
+            y2: points.to.y,
+            strokeWidth: Math.max(channelWidth * 0.08, 8),
+            kind: 'inlet',
+            color: 'black',
+          })
+        }
+
+        const outletLabels = Array.from(svgRoot.querySelectorAll('text')).filter((textElement) =>
+          /^outlet(?:_|\b)/i.test(textElement.textContent?.trim() ?? ''),
+        )
+
+        for (const [index, label] of outletLabels.entries()) {
+          const port = nearestPort(label)
+          if (!port) continue
+          const pathMatch = pathAtPort(port)
+          if (!pathMatch) continue
+
+          const channelWidth = pathMatch.channelWidth
+          const arrowLength = channelWidth * 0.9
+          const points = arrowAlongChannel(pathMatch, port, arrowLength, true)
+          if (!points) continue
+
+          arrows.push({
+            id: `${label.textContent?.trim() ?? 'outlet'}-${index}`,
+            x1: points.from.x,
+            y1: points.from.y,
+            x2: points.to.x,
+            y2: points.to.y,
+            strokeWidth: Math.max(channelWidth * 0.08, 8),
+            kind: 'outlet',
+            color: 'white',
+          })
+        }
+
+        return arrows.length > 0 ? { viewBox, arrows } : null
+      } catch (error) {
+        console.warn('Could not create inlet flow arrows:', error)
+        return null
+      }
     })
 
     // Function to select a message
@@ -1251,7 +1741,14 @@ export default {
 
           // Replace the assistant message with the corrected design
           if (correctedChipDesign) {
-            assistantMessage.value.content = JSON.stringify(correctedChipDesign, null, 2)
+            const originalHasContent = chipDesignHasContent(chipDesign)
+            const correctedHasContent = chipDesignHasContent(correctedChipDesign)
+
+            if (correctedHasContent || !originalHasContent) {
+              assistantMessage.value.content = JSON.stringify(correctedChipDesign, null, 2)
+            } else {
+              console.warn('Skipped empty corrected chip design to preserve generated content.')
+            }
 
             // Autoscroll to bottom after correction
             if (scrolled) {
@@ -1378,6 +1875,7 @@ export default {
       if (document.activeElement instanceof HTMLElement) {
         document.activeElement.blur()
       }
+      closeRoutingTip()
 
       // resynthesize with new settings
       if (
@@ -1397,6 +1895,8 @@ export default {
       if (!assistantMessage.value.content) return
       if (assistantMessage.value.isOptimizing) return
       if (assistantMessage.value.isGenerating) return
+
+      let synthesisSucceededWithContent = false
 
       try {
         // Set loading state
@@ -1465,6 +1965,12 @@ export default {
         if (json.chipJson) {
           assistantMessage.value.chipJson = json.chipJson
         }
+        if (json.flui3dJson) {
+          assistantMessage.value.flui3dJson = json.flui3dJson
+        }
+
+        synthesisSucceededWithContent =
+          Boolean(processedSvg) && chipDesignHasContent(JSON.parse(assistantMessage.value.content))
       } catch (error) {
         console.error('Error synthesizing chip:', error)
         assistantMessage.value.synthesisError =
@@ -1473,6 +1979,11 @@ export default {
       } finally {
         // Reset loading state regardless of success/error
         assistantMessage.value.isSynthesizing = false
+        if (synthesisSucceededWithContent) {
+          nextTick(() => {
+            scheduleRoutingTipOnce()
+          })
+        }
       }
     }
 
@@ -1523,6 +2034,8 @@ export default {
       chatMessages.value = []
       userMessage.value = ''
       selectedMessagePairId.value = 0
+      hasAutoShownRoutingTip = false
+      closeRoutingTip()
 
       if (abortController) {
         abortController.abort()
@@ -1578,6 +2091,19 @@ export default {
     }
 
     const isGeneratingStl = ref(false)
+
+    const downloadFlui3DJson = () => {
+      const flui3dJson = selectedMessagePair.value?.assistant?.flui3dJson
+      if (!flui3dJson) return
+
+      const blob = new Blob([flui3dJson], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'microfluidic_chip_flui3d.json'
+      a.click()
+      URL.revokeObjectURL(url)
+    }
 
     const downloadSTL = async () => {
       if (
@@ -1750,6 +2276,7 @@ export default {
       adjustHeight,
       autoScroll,
       selectedMessagePair,
+      inletFlowOverlay,
       selectMessagePair,
       switchView,
       isMessageHoverable,
@@ -1762,10 +2289,16 @@ export default {
       discardLaterMessagesSendNew,
       messagePairIdCounter,
       settings,
+      closeRoutingTip,
+      openRoutingTip,
+      routingTipCard,
+      routingDisconnectedImage,
+      routingConnectedImage,
       reasoningEnabled,
       toggleReasoning,
       trimmedLines,
       downloadSVG,
+      downloadFlui3DJson,
       downloadSTL,
       isGeneratingStl,
       isGeneratingStep,
@@ -1795,6 +2328,40 @@ export default {
 
 .chat-transition-leave-active {
   position: absolute;
+}
+
+.routing-tip-card {
+  transform-origin: calc(100% - 2rem) -2.75rem;
+}
+
+.routing-tip-card::before {
+  content: '';
+  position: absolute;
+  top: -0.85rem;
+  right: 5.85rem;
+  width: 0;
+  height: 0;
+  border-left: 0.75rem solid transparent;
+  border-right: 0.75rem solid transparent;
+  border-bottom: 0.85rem solid hsl(var(--b1));
+}
+
+.routing-tip-card {
+  transition:
+    opacity 0.22s ease,
+    transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.routing-tip-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(0, 0) scale(1);
+}
+
+.routing-tip-hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(2rem, -1.75rem) scale(0.72);
 }
 
 @keyframes loading {

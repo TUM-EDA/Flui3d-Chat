@@ -17,6 +17,7 @@ import {
   faGear,
   faDownload,
   faDatabase,
+  faCircleQuestion,
 } from '@fortawesome/free-solid-svg-icons'
 
 import { faLightbulb } from '@fortawesome/free-regular-svg-icons'
@@ -34,6 +35,7 @@ library.add(
   faLightbulb,
   faDownload,
   faDatabase,
+  faCircleQuestion,
 )
 
 const app = createApp(App)
